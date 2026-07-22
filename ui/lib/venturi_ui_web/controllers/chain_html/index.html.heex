@@ -1,0 +1,52 @@
+<.header>
+  Chain References
+  <:subtitle>Look up cross-chain references, or declare a new one.</:subtitle>
+</.header>
+
+<.simple_form for={@lookup_form} action={~p"/chains"} method="get">
+  <:actions>
+    <.input field={@lookup_form[:parent_id]} label="Parent ID" />
+    <.button>Look up</.button>
+  </:actions>
+</.simple_form>
+
+<div :if={@error} class="mt-6 rounded-lg bg-rose-50 p-4 text-sm text-rose-700">
+  {@error}
+</div>
+
+<div :if={@references} class="mt-8">
+  <.table
+    id="references"
+    rows={@references}
+    row_id={
+      fn ref -> "ref-#{ref["from_parent_id"]}-#{ref["to_parent_id"]}-#{ref["reference_type"]}" end
+    }
+  >
+    <:col :let={ref} label="From">{ref["from_parent_id"]}</:col>
+    <:col :let={ref} label="To">{ref["to_parent_id"]}</:col>
+    <:col :let={ref} label="Type">{ref["reference_type"]}</:col>
+    <:col :let={ref} label="Created">{ref["created_at"]}</:col>
+  </.table>
+  <p :if={@references == []} class="mt-4 text-sm text-zinc-500">
+    No references found for <code>{@parent_id}</code>.
+  </p>
+</div>
+
+<.header class="mt-12">
+  Declare a Reference
+  <:subtitle>Chain A can supersede, support, contradict, or cite chain B.</:subtitle>
+</.header>
+
+<.simple_form for={@link_form} action={~p"/chains/link"}>
+  <.input field={@link_form[:from_parent_id]} label="From parent ID" />
+  <.input field={@link_form[:to_parent_id]} label="To parent ID" />
+  <.input
+    field={@link_form[:reference_type]}
+    type="select"
+    label="Reference type"
+    options={["supersedes", "supports", "contradicts", "cites"]}
+  />
+  <:actions>
+    <.button>Link chains</.button>
+  </:actions>
+</.simple_form>

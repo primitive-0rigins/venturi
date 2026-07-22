@@ -1,0 +1,23 @@
+<.header>
+  Legal Hold
+  <:subtitle>Placing a hold blocks expiry deletion until explicitly released.</:subtitle>
+</.header>
+
+<.simple_form for={@hold_form} action={~p"/holds"}>
+  <.input field={@hold_form[:parent_id]} label="Parent ID" />
+  <.input field={@hold_form[:reason]} type="textarea" label="Reason" />
+  <:actions>
+    <.button>Place hold</.button>
+  </:actions>
+</.simple_form>
+
+<.header class="mt-12">
+  Release a Hold
+</.header>
+
+<.simple_form for={@release_form} action={~p"/holds"} method="delete">
+  <.input field={@release_form[:parent_id]} label="Parent ID" />
+  <:actions>
+    <.button>Release hold</.button>
+  </:actions>
+</.simple_form>

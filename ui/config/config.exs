@@ -1,0 +1,60 @@
+# This file is responsible for configuring your application
+# and its dependencies with the aid of the Config module.
+#
+# This configuration file is loaded before any dependency and
+# is restricted to this project.
+
+# General application configuration
+import Config
+
+config :venturi_ui,
+  generators: [timestamp_type: :utc_datetime]
+
+config :venturi_ui, :venturi_api,
+  base_url: "http://localhost:8080",
+  api_key: nil
+
+# Configures the endpoint
+config :venturi_ui, VenturiUiWeb.Endpoint,
+  url: [host: "localhost"],
+  adapter: Bandit.PhoenixAdapter,
+  render_errors: [
+    formats: [html: VenturiUiWeb.ErrorHTML, json: VenturiUiWeb.ErrorJSON],
+    layout: false
+  ],
+  pubsub_server: VenturiUi.PubSub,
+  live_view: [signing_salt: "FEATCCWf"]
+
+# Configure esbuild (the version is required)
+config :esbuild,
+  version: "0.17.11",
+  venturi_ui: [
+    args:
+      ~w(js/app.js --bundle --target=es2017 --outdir=../priv/static/assets --external:/fonts/* --external:/images/*),
+    cd: Path.expand("../assets", __DIR__),
+    env: %{"NODE_PATH" => Path.expand("../deps", __DIR__)}
+  ]
+
+# Configure tailwind (the version is required)
+config :tailwind,
+  version: "3.4.3",
+  venturi_ui: [
+    args: ~w(
+      --config=tailwind.config.js
+      --input=css/app.css
+      --output=../priv/static/assets/app.css
+    ),
+    cd: Path.expand("../assets", __DIR__)
+  ]
+
+# Configures Elixir's Logger
+config :logger, :console,
+  format: "$time $metadata[$level] $message\n",
+  metadata: [:request_id]
+
+# Use Jason for JSON parsing in Phoenix
+config :phoenix, :json_library, Jason
+
+# Import environment specific config. This must remain at the bottom
+# of this file so it overrides the configuration defined above.
+import_config "#{config_env()}.exs"

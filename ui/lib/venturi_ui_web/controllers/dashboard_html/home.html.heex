@@ -1,0 +1,35 @@
+<.header>
+  System Health
+  <:subtitle>Live capability status from the Venturi API.</:subtitle>
+</.header>
+
+<div :if={@error} class="mt-6 rounded-lg bg-rose-50 p-4 text-sm text-rose-700">
+  {@error}
+</div>
+
+<div :if={@health} class="mt-6">
+  <div class="mb-4 flex items-center gap-2">
+    <span class={[
+      "inline-block h-2.5 w-2.5 rounded-full",
+      if(@health["ok"], do: "bg-emerald-500", else: "bg-rose-500")
+    ]}>
+    </span>
+    <span class="font-semibold">{if @health["ok"], do: "Online", else: "Degraded"}</span>
+  </div>
+
+  <.table id="capabilities" rows={Map.to_list(@health["capabilities"] || %{})}>
+    <:col :let={{name, _status}} label="Subsystem">{name}</:col>
+    <:col :let={{_name, status}} label="Status">
+      <span class={[
+        "rounded-full px-2 py-0.5 text-xs font-medium",
+        case status do
+          "ready" -> "bg-emerald-50 text-emerald-700"
+          "degraded" -> "bg-amber-50 text-amber-700"
+          _ -> "bg-zinc-100 text-zinc-700"
+        end
+      ]}>
+        {status}
+      </span>
+    </:col>
+  </.table>
+</div>

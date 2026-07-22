@@ -1,0 +1,42 @@
+<.header>
+  Retrieval Audit Lookup
+  <:subtitle>Look up a retrieval proof by its audit ID.</:subtitle>
+</.header>
+
+<.simple_form for={@form} action={~p"/audit"} method="get">
+  <:actions>
+    <.input field={@form[:retrieval_audit_id]} label="Retrieval audit ID" />
+    <.button>Look up</.button>
+  </:actions>
+</.simple_form>
+
+<div :if={@error} class="mt-6 rounded-lg bg-rose-50 p-4 text-sm text-rose-700">
+  {@error}
+</div>
+
+<div :if={@proof} class="mt-8">
+  <.table
+    id="proof"
+    rows={[
+      {"Retrieval audit ID", @proof["retrieval_audit_id"]},
+      {"Actor", @proof["actor_id"]},
+      {"Mode", @proof["mode"]},
+      {"Query", @proof["query"]},
+      {"Filters applied", Jason.encode!(@proof["filters_applied"] || %{})},
+      {"Candidate count", @proof["candidate_count"]},
+      {"Selected orb IDs", Enum.join(@proof["selected_orb_ids"] || [], ", ")},
+      {"Selected parent IDs", Enum.join(@proof["selected_parent_ids"] || [], ", ")},
+      {"Embedding model version", @proof["embedding_model_version"]},
+      {"Chain complete", @proof["chain_complete"]},
+      {"Retrieval timestamp", @proof["retrieval_timestamp"]}
+    ]}
+  >
+    <:col :let={{label, _value}} label="Field">{label}</:col>
+    <:col :let={{_label, value}} label="Value">{value}</:col>
+  </.table>
+
+  <p class="mt-4 text-xs text-zinc-500">
+    <code>key_ids_used</code> is intentionally never returned by the API — the proof
+    proves access happened without exposing which encryption key was used.
+  </p>
+</div>
