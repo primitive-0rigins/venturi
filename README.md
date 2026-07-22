@@ -33,6 +33,18 @@ required at startup; it can issue scoped agent keys for read, write, or full
 administrative access. Keep keys and the data directory private. If you expose
 Venturi beyond the local machine, put it behind TLS and a network boundary.
 
+## Operator dashboard
+
+`ui/` is a standalone Elixir/Phoenix app that gives an operator a read/light-write
+console over the API: health, retrieval audit lookup, chain references, and
+legal hold. It talks to Venturi over HTTP and adds no new backend endpoints.
+
+```bash
+cd ui
+mix deps.get
+VENTURI_API_URL="http://127.0.0.1:9271" VENTURI_API_KEY="$VENTURI_ADMIN_KEY" mix phx.server
+```
+
 ## Verify
 
 ```bash

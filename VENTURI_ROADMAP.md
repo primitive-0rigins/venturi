@@ -55,6 +55,28 @@ surface above is reviewed against operator needs.
 
 ## Phase: COMPLETED
 
+### O1 — Operator Dashboard
+**Status:** Implemented — `ui/` is a standalone Elixir/Phoenix app that talks
+to the Venturi API over HTTP.
+
+**Effort:** Low–Medium | **Value:** Medium (operability, not a new capability)
+**Source:** Owner request — a read/light-write console over the existing API
+
+A server-rendered dashboard (no LiveView, no JS framework) covering the parts
+of the API an operator actually touches by hand: system health and
+capability status, retrieval audit proof lookup, chain reference
+viewing/linking, and legal hold placement/release. It adds no new backend
+endpoints — every page is a thin view over routes that already existed.
+
+Talks to Venturi via `VenturiUi.VenturiClient`, a small `Req`-based client
+configured with `VENTURI_API_URL` and `VENTURI_API_KEY`. Controller tests
+stub the HTTP transport with `Req.Test` rather than requiring a live backend.
+
+**Where it goes:** `ui/` — separate `mix.exs` project, run independently of
+the Rust binary (`cd ui && mix phx.server`).
+
+---
+
 ### N1 — Overlay Consensus Retrieval
 **Status:** Implemented — `Venturi::consensus()` and
 `POST /retrieve/consensus` return core vs. supplementary chunks with retrieval
