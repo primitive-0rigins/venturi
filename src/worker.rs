@@ -91,6 +91,21 @@ pub enum VenturiCommand {
         agent_id: Option<String>,
         reply: Reply<RetrievalWithProof<Vec<u8>>>,
     },
+    DocumentChainOrbIds {
+        parent_id: String,
+        reply: Reply<Vec<String>>,
+    },
+    RehydrateOrbForStream {
+        orb_id: String,
+        reply: oneshot::Sender<(Vec<u8>, Option<String>)>,
+    },
+    FinalizeDocumentStream {
+        parent_id: String,
+        orb_ids: Vec<String>,
+        warnings: Vec<String>,
+        agent_id: Option<String>,
+        reply: Reply<(String, Option<String>)>,
+    },
     GraphQueryWithProof {
         query: String,
         max_hops: u32,
@@ -264,6 +279,43 @@ impl CommandSender {
     ) -> Result<RetrievalWithProof<Vec<u8>>, WorkerError> {
         self.call(|reply| VenturiCommand::DocumentByParentIdWithProof {
             parent_id,
+            agent_id,
+            reply,
+        })
+        .await
+    }
+
+    /// Ordered orb ids for a chain (roadmap B2 streaming) — the cheap first
+    /// step of a streamed document retrieval.
+    pub async fn document_chain_orb_ids(&self, parent_id: String) -> Result<Vec<String>, WorkerError> {
+        self.call(|reply| VenturiCommand::DocumentChainOrbIds { parent_id, reply })
+            .await
+    }
+
+    /// Rehydrate one orb for streamed delivery. Infallible on the Venturi
+    /// side (failure degrades to a corruption marker + warning) — only the
+    /// channel itself can fail here.
+    pub async fn rehydrate_orb_for_stream(
+        &self,
+        orb_id: String,
+    ) -> Result<(Vec<u8>, Option<String>), WorkerError> {
+        self.call_infallible(|reply| VenturiCommand::RehydrateOrbForStream { orb_id, reply })
+            .await
+    }
+
+    /// Record Scribe + retrieval proof bookkeeping once a streamed document
+    /// has been fully delivered.
+    pub async fn finalize_document_stream(
+        &self,
+        parent_id: String,
+        orb_ids: Vec<String>,
+        warnings: Vec<String>,
+        agent_id: Option<String>,
+    ) -> Result<(String, Option<String>), WorkerError> {
+        self.call(|reply| VenturiCommand::FinalizeDocumentStream {
+            parent_id,
+            orb_ids,
+            warnings,
             agent_id,
             reply,
         })
@@ -531,6 +583,26 @@ fn handle_command(venturi: &mut Venturi, cmd: VenturiCommand) {
             let _ = reply.send(
                 venturi.document_by_parent_id_with_proof(&parent_id, agent_id.as_deref()),
             );
+        }
+        VenturiCommand::DocumentChainOrbIds { parent_id, reply } => {
+            let _ = reply.send(venturi.document_chain_orb_ids(&parent_id));
+        }
+        VenturiCommand::RehydrateOrbForStream { orb_id, reply } => {
+            let _ = reply.send(venturi.rehydrate_orb_for_stream(&orb_id));
+        }
+        VenturiCommand::FinalizeDocumentStream {
+            parent_id,
+            orb_ids,
+            warnings,
+            agent_id,
+            reply,
+        } => {
+            let _ = reply.send(venturi.finalize_document_stream(
+                &parent_id,
+                &orb_ids,
+                &warnings,
+                agent_id.as_deref(),
+            ));
         }
         VenturiCommand::GraphQueryWithProof {
             query,

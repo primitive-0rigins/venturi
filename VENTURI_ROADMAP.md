@@ -432,12 +432,35 @@ agent from starving others through the single Mutex.
 ## Phase: BACKLOG
 
 ### B2 — Streaming Document Retrieval
+**Status:** Implemented — `GET /retrieve/document/:parent_id/stream` delivers
+a chain as newline-delimited JSON, one rehydrated orb per line, instead of
+one large JSON body.
+
 **Effort:** High | **Value:** Medium
 **Source:** Design notes — Concurrency Roadmap Phase 3
 
 For very large document chains (hundreds of orbs), return content as a chunked
 stream rather than waiting for full reassembly. Requires axum streaming response.
 Not needed until document sizes warrant it.
+
+Added as a new sibling endpoint alongside `GET /retrieve/document/:parent_id`
+rather than a query flag on it — keeps the existing endpoint's response shape
+and tests completely untouched. Each `chunk` line carries one orb
+(`index`/`total`/`orb_id`/base64 `content`); the stream always ends with
+exactly one `done` line (warnings, `retrieval_audit_id`, `cache_tier`) or
+`error` line, so a caller can tell a truncated stream from a complete one.
+
+Built on top of the R2 worker: chain metadata is fetched once, then each orb
+is rehydrated with its own round trip through the worker channel
+(`Venturi::document_chain_orb_ids` / `rehydrate_orb_for_stream` /
+`finalize_document_stream` in `src/api.rs`, wired through
+`src/worker.rs`) — a slow-draining HTTP client never holds the single worker
+thread, since it's never waiting on client I/O between orb fetches.
+
+**Where it goes:** `src/api.rs` (three new `Venturi` methods), `src/worker.rs`
+(matching `VenturiCommand` variants), `src/server.rs`
+(`retrieve_document_stream` handler + route, backed by
+`futures_util::stream::unfold`).
 
 ---
 

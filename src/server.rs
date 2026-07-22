@@ -1,6 +1,7 @@
 use axum::{
+    body::{Body, Bytes},
     extract::{Path, Query, Request, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     middleware::{self, Next},
     response::{Json, Response},
     routing::{get, post},
@@ -18,6 +19,7 @@ use std::collections::{HashMap, VecDeque};
 ///   POST /retrieve/context     — similarity search → prompt-ready chunks
 ///   POST /retrieve/document    — reassemble full document by query
 ///   GET  /retrieve/document/:parent_id — reassemble by known parent_id (no Ollama)
+///   GET  /retrieve/document/:parent_id/stream — same, delivered as newline-delimited JSON
 ///   POST /retrieve/graph       — BFS traversal from query concepts
 ///   POST /retrieve/consensus   — overlay retrieval core + supplementary split
 ///   POST /retrieve/temporal    — date-range + subject filter
@@ -706,6 +708,145 @@ async fn retrieve_document_by_id(
     }))
 }
 
+/// One line of the `application/x-ndjson` body returned by
+/// `retrieve_document_stream`. `chunk` lines carry one rehydrated orb each;
+/// the stream always ends with exactly one `done` or `error` line so a
+/// caller can tell a truncated response (connection dropped mid-chunk) apart
+/// from a complete one.
+#[derive(Serialize)]
+#[serde(tag = "type")]
+enum DocumentStreamLine {
+    #[serde(rename = "chunk")]
+    Chunk {
+        index: usize,
+        total: usize,
+        orb_id: String,
+        content: String,
+    },
+    #[serde(rename = "done")]
+    Done {
+        warnings: Vec<String>,
+        retrieval_audit_id: String,
+        cache_tier: Option<String>,
+    },
+    #[serde(rename = "error")]
+    Error { message: String },
+}
+
+fn stream_line_bytes(line: &DocumentStreamLine) -> Bytes {
+    let mut json = serde_json::to_string(line).expect("DocumentStreamLine always serializes");
+    json.push('\n');
+    Bytes::from(json.into_bytes())
+}
+
+/// State threaded through the `futures_util::stream::unfold` that backs
+/// `retrieve_document_stream`. `orb_ids` is fetched once up front; each
+/// `unfold` step sends exactly one command over the worker channel (either
+/// one orb rehydration or the final bookkeeping call) so a slow-draining
+/// client never holds the single worker thread — see src/worker.rs.
+struct DocumentStreamState {
+    venturi: SharedVenturi,
+    parent_id: String,
+    orb_ids: Vec<String>,
+    next_index: usize,
+    warnings: Vec<String>,
+    finished: bool,
+}
+
+async fn document_stream_next(
+    mut state: DocumentStreamState,
+) -> Option<(Result<Bytes, std::convert::Infallible>, DocumentStreamState)> {
+    if state.finished {
+        return None;
+    }
+
+    if state.next_index < state.orb_ids.len() {
+        let index = state.next_index;
+        let orb_id = state.orb_ids[index].clone();
+        state.next_index += 1;
+
+        match state.venturi.rehydrate_orb_for_stream(orb_id.clone()).await {
+            Ok((content, warning)) => {
+                if let Some(warning) = warning {
+                    state.warnings.push(warning);
+                }
+                let line = DocumentStreamLine::Chunk {
+                    index,
+                    total: state.orb_ids.len(),
+                    orb_id,
+                    content: base64_encode(&content),
+                };
+                Some((Ok(stream_line_bytes(&line)), state))
+            }
+            Err(error) => {
+                state.finished = true;
+                let line = DocumentStreamLine::Error {
+                    message: error.to_string(),
+                };
+                Some((Ok(stream_line_bytes(&line)), state))
+            }
+        }
+    } else {
+        state.finished = true;
+        let line = match state
+            .venturi
+            .finalize_document_stream(
+                state.parent_id.clone(),
+                state.orb_ids.clone(),
+                state.warnings.clone(),
+                None,
+            )
+            .await
+        {
+            Ok((retrieval_audit_id, cache_tier)) => DocumentStreamLine::Done {
+                warnings: state.warnings.clone(),
+                retrieval_audit_id,
+                cache_tier,
+            },
+            Err(error) => DocumentStreamLine::Error {
+                message: error.to_string(),
+            },
+        };
+        Some((Ok(stream_line_bytes(&line)), state))
+    }
+}
+
+/// Streamed sibling of `retrieve_document_by_id`: same chain, delivered as
+/// newline-delimited JSON (one `chunk` line per orb) instead of one large
+/// JSON body, so a caller can start processing a large document chain
+/// before the whole thing is rehydrated. See roadmap item B2.
+async fn retrieve_document_stream(
+    State(state): State<ServerState>,
+    Path(parent_id): Path<String>,
+) -> Result<Response, (StatusCode, String)> {
+    enforce_rate_limit(&state, "anonymous", RateLimitedOp::Retrieval)?;
+
+    let orb_ids = state
+        .venturi
+        .document_chain_orb_ids(parent_id.clone())
+        .await
+        .map_err(worker_error)?;
+
+    let initial = DocumentStreamState {
+        venturi: state.venturi.clone(),
+        parent_id,
+        orb_ids,
+        next_index: 0,
+        warnings: Vec::new(),
+        finished: false,
+    };
+    let body = Body::from_stream(futures_util::stream::unfold(
+        initial,
+        document_stream_next,
+    ));
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/x-ndjson")
+        .body(body)
+        .expect("static response builder call never fails"))
+}
+
 async fn retrieve_graph(
     State(state): State<ServerState>,
     Json(body): Json<GraphBody>,
@@ -1094,6 +1235,10 @@ fn build_router_with_state(state: ServerState) -> Router {
             "/retrieve/document/:parent_id",
             get(retrieve_document_by_id),
         )
+        .route(
+            "/retrieve/document/:parent_id/stream",
+            get(retrieve_document_stream),
+        )
         .route("/retrieve/graph", post(retrieve_graph))
         .route("/retrieve/consensus", post(retrieve_consensus))
         .route("/retrieve/temporal", post(retrieve_temporal))
@@ -1376,5 +1521,149 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ── streamed document retrieval (roadmap B2) ──────────────────────────
+
+    fn json_request(method: &str, path: &str, key: &str, body: serde_json::Value) -> HttpRequest<Body> {
+        HttpRequest::builder()
+            .method(method)
+            .uri(path)
+            .header("authorization", format!("Bearer {key}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    async fn body_bytes(response: Response) -> Vec<u8> {
+        use http_body_util::BodyExt;
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec()
+    }
+
+    fn ndjson_lines(bytes: &[u8]) -> Vec<serde_json::Value> {
+        std::str::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn streamed_document_matches_non_streaming_reassembly() {
+        let (router, _dir) = test_router(vec![ApiKey {
+            value: "admin-key".to_string(),
+            scope: Scope::Admin,
+        }]);
+
+        let ingest_body = serde_json::json!({
+            "agent_id": "stream-test-agent",
+            "topic": "streaming",
+            "domain": "test",
+            "date": "2026-07-21",
+            "format": "text",
+            "summary": "a three-orb chain for streaming tests",
+            "chunks": [
+                base64_encode(b"first orb content "),
+                base64_encode(b"second orb content "),
+                base64_encode(b"third orb content"),
+            ],
+        });
+        let ingest_response = router
+            .clone()
+            .oneshot(json_request("POST", "/ingest", "admin-key", ingest_body))
+            .await
+            .unwrap();
+        assert_eq!(ingest_response.status(), StatusCode::OK);
+        let ingest_json: serde_json::Value =
+            serde_json::from_slice(&body_bytes(ingest_response).await).unwrap();
+        let parent_id = ingest_json["parent_id"].as_str().unwrap().to_string();
+        assert_eq!(ingest_json["orb_count"], 3);
+
+        let stream_response = router
+            .clone()
+            .oneshot(request(
+                "GET",
+                &format!("/retrieve/document/{parent_id}/stream"),
+                Some("admin-key"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(stream_response.status(), StatusCode::OK);
+        assert_eq!(
+            stream_response.headers().get("content-type").unwrap(),
+            "application/x-ndjson"
+        );
+        let lines = ndjson_lines(&body_bytes(stream_response).await);
+
+        // Exactly 3 chunk lines followed by exactly 1 done line, in order.
+        assert_eq!(lines.len(), 4);
+        let mut reassembled = Vec::new();
+        for (i, line) in lines[..3].iter().enumerate() {
+            assert_eq!(line["type"], "chunk");
+            assert_eq!(line["index"], i);
+            assert_eq!(line["total"], 3);
+            reassembled.extend(base64_decode(line["content"].as_str().unwrap()).unwrap());
+        }
+        assert_eq!(lines[3]["type"], "done");
+        assert!(lines[3]["warnings"].as_array().unwrap().is_empty());
+        let retrieval_audit_id = lines[3]["retrieval_audit_id"].as_str().unwrap().to_string();
+        assert!(!retrieval_audit_id.is_empty());
+
+        let non_streaming_response = router
+            .clone()
+            .oneshot(request(
+                "GET",
+                &format!("/retrieve/document/{parent_id}"),
+                Some("admin-key"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(non_streaming_response.status(), StatusCode::OK);
+        let non_streaming_json: serde_json::Value =
+            serde_json::from_slice(&body_bytes(non_streaming_response).await).unwrap();
+        let non_streaming_content =
+            base64_decode(non_streaming_json["content"].as_str().unwrap()).unwrap();
+
+        assert_eq!(reassembled, non_streaming_content);
+        assert_eq!(
+            reassembled,
+            b"first orb content second orb content third orb content".to_vec()
+        );
+
+        // The proof the stream reported is fetchable, like any other retrieval proof.
+        let audit_response = router
+            .oneshot(request(
+                "GET",
+                &format!("/audit/{retrieval_audit_id}"),
+                Some("admin-key"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(audit_response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn streaming_unknown_parent_id_returns_not_found_without_a_body() {
+        let (router, _dir) = test_router(vec![ApiKey {
+            value: "admin-key".to_string(),
+            scope: Scope::Admin,
+        }]);
+
+        let response = router
+            .oneshot(request(
+                "GET",
+                "/retrieve/document/does-not-exist/stream",
+                Some("admin-key"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

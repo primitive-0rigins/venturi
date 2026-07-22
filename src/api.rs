@@ -382,6 +382,72 @@ impl Venturi {
         self.assemble_chain_by_parent_id(parent_id, parent_id, "document", None, agent_id)
     }
 
+    // ── Retrieval: Document by parent_id, streamed (roadmap B2) ───────────────
+    //
+    // Split into three steps so a caller can rehydrate and deliver one orb at
+    // a time instead of holding the full chain in memory: fetch the ordered
+    // orb id list, rehydrate each orb individually, then finalize (Scribe +
+    // retrieval proof) once every orb has been attempted. Each step is a
+    // single fast call — the right shape for going through the worker
+    // channel (src/worker.rs) one round trip at a time, so a slow HTTP
+    // client draining a stream never holds up the single worker thread.
+
+    /// Ordered orb ids for a chain, capped at `max_orbs_per_query` — the same
+    /// first step `assemble_chain_by_parent_id` takes, without decrypting
+    /// content.
+    pub fn document_chain_orb_ids(&self, parent_id: &str) -> Result<Vec<String>, TunnelError> {
+        let rows = self.gatekeeper.librarian().fetch_chain(parent_id)?;
+        if rows.is_empty() {
+            return Err(TunnelError::OrbNotFound {
+                id: parent_id.to_string(),
+            });
+        }
+        let rows = &rows[..rows.len().min(self.limits.max_orbs_per_query)];
+        let _ = self.gatekeeper.librarian().mark_accessed(parent_id);
+        Ok(rows.iter().map(|r| r.orb_id.clone()).collect())
+    }
+
+    /// Rehydrate one orb for streamed delivery. Mirrors the per-orb handling
+    /// inside `assemble_rows`: 3 retries, then a corruption marker plus a
+    /// warning message on persistent failure. Never returns `Err` — a bad
+    /// orb degrades to a marker instead of aborting the stream, exactly like
+    /// the non-streaming path degrades instead of aborting assembly.
+    pub fn rehydrate_orb_for_stream(&self, orb_id: &str) -> (Vec<u8>, Option<String>) {
+        match self.load_and_rehydrate_with_retry(orb_id) {
+            Ok(content) => (content, None),
+            Err(warning) => (Self::make_corruption_marker(orb_id), Some(warning)),
+        }
+    }
+
+    /// Record the Scribe retrieval event and retrieval proof once a streamed
+    /// document is fully delivered — the same bookkeeping
+    /// `assemble_chain_by_parent_id` does after assembly, deferred until the
+    /// full orb id list and warning set are known.
+    pub fn finalize_document_stream(
+        &self,
+        parent_id: &str,
+        orb_ids: &[String],
+        warnings: &[String],
+        agent_id: Option<&str>,
+    ) -> Result<(String, Option<String>), TunnelError> {
+        let _ = self.gatekeeper.scribe().record_retrieval(
+            parent_id,
+            "document_stream",
+            agent_id,
+            orb_ids,
+        );
+        self.audit_retrieval_failures(parent_id, "document_stream", agent_id, orb_ids, warnings);
+        let audit_id = self.record_retrieval_proof(
+            agent_id,
+            "document_stream",
+            parent_id,
+            serde_json::json!({"parent_id": parent_id}),
+            orb_ids,
+            warnings.is_empty(),
+        )?;
+        Ok((audit_id, self.cache_tier_for_orbs(orb_ids)))
+    }
+
     // ── Retrieval: Graph mode ─────────────────────────────────────────────────
 
     /// Graph mode: BFS traversal from query-matched concept nodes → collect all
