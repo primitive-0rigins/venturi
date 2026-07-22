@@ -181,6 +181,16 @@ impl<'a> Sweeper<'a> {
             orbs_ejected: 0,
         })
     }
+
+    /// Spectral community detection sweep (R1) — run every ~30 minutes.
+    ///
+    /// Recomputes `community_id` on every knowledge-graph node from current
+    /// edge/hyperedge weights. `graph_query()`'s BFS traversal then gains a
+    /// hop-independent "same community" pass on top of local expansion. See
+    /// `KnowledgeGraph::detect_communities`.
+    pub fn sweep_communities(&self) -> Result<SweepReport, TunnelError> {
+        self.graph.detect_communities()
+    }
 }
 
 /// Summary of what a sweep did. Useful for logging.

@@ -36,7 +36,7 @@ async fn main() {
     let app = build_router(shared);
     let addr = format!("127.0.0.1:{}", port);
     println!("Venturi listening on http://{}", addr);
-    println!("Sweeps: access_marks=5min  tiers=15min  lifecycle=60s  expiry=daily  embeddings=30s");
+    println!("Sweeps: access_marks=5min  tiers=15min  lifecycle=60s  expiry=daily  embeddings=30s  communities=30min");
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -117,7 +117,16 @@ fn spawn_sweeps(shared: SharedVenturi) {
         |v| v.lifecycle_sweep(),
     );
 
-    // Sweep 5: embedding queue — every 30 seconds, no initial skip
+    // Sweep 5: spectral community detection — every 30 minutes
+    spawn_skipped_interval(
+        Arc::clone(&shared),
+        "communities",
+        Duration::from_secs(30 * 60),
+        false,
+        |v| v.sweep_communities(),
+    );
+
+    // Sweep 6: embedding queue — every 30 seconds, no initial skip
     // Processes leftover queue items immediately on startup, then on interval.
     let v = Arc::clone(&shared);
     tokio::spawn(async move {

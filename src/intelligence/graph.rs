@@ -1,7 +1,12 @@
+use crate::intelligence::community::CommunityDetector;
+use crate::pipeline::sweep::SweepReport;
 use crate::types::error::TunnelError;
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+/// Upper bound on cluster count for spectral community detection (roadmap: 5-10).
+const COMMUNITY_MAX_K: usize = 8;
 
 /// Knowledge Graph — concept relationship map across all ingested documents.
 ///
@@ -63,6 +68,10 @@ impl KnowledgeGraph {
         ",
         )
         .map_err(|e| TunnelError::DatabaseError(e.to_string()))?;
+
+        // Migration: community_id added by R1 spectral community detection.
+        // SQLite has no `ADD COLUMN IF NOT EXISTS`; ignore the error on repeat opens.
+        let _ = conn.execute_batch("ALTER TABLE kg_nodes ADD COLUMN community_id TEXT");
 
         Ok(Self {
             conn,
@@ -192,14 +201,161 @@ impl KnowledgeGraph {
 
     /// Graph mode: find nodes matching query concepts, traverse edges,
     /// return all parent_id chains reachable from matched nodes.
+    ///
+    /// Two passes: BFS out to `max_hops` (local, hop-limited), plus a
+    /// community-membership pass that adds every node sharing a
+    /// `community_id` with a matched anchor, regardless of hop distance (see
+    /// `detect_communities` / VENTURI_ROADMAP.md R1). BFS alone misses
+    /// concepts that are semantically related but many hops away; the
+    /// community pass catches those once a sweep has populated
+    /// `community_id`. Nodes with no `community_id` yet (sweep hasn't run,
+    /// or the node was isolated) simply get no extra pass — behavior is
+    /// unchanged from pre-R1 BFS-only traversal.
     pub fn traverse(&self, query: &str, max_hops: u32) -> Result<Vec<String>, TunnelError> {
         let matched_nodes = self.matching_nodes(query)?;
         if matched_nodes.is_empty() {
             return Ok(Vec::new());
         }
 
-        let visited = self.expand_nodes(matched_nodes, max_hops)?;
+        let mut visited = self.expand_nodes(matched_nodes.clone(), max_hops)?;
+
+        let community_ids = self.community_ids_for_nodes(&matched_nodes)?;
+        if !community_ids.is_empty() {
+            for node_id in self.nodes_in_communities(&community_ids)? {
+                if !visited.contains(&node_id) {
+                    visited.push(node_id);
+                }
+            }
+        }
+
         self.parent_ids_for_nodes(&visited)
+    }
+
+    fn community_ids_for_nodes(&self, node_ids: &[String]) -> Result<Vec<String>, TunnelError> {
+        let mut ids = Vec::new();
+        for node_id in node_ids {
+            let community_id: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT community_id FROM kg_nodes WHERE node_id = ?1",
+                    params![node_id],
+                    |r| r.get(0),
+                )
+                .ok()
+                .flatten();
+            if let Some(community_id) = community_id {
+                if !ids.contains(&community_id) {
+                    ids.push(community_id);
+                }
+            }
+        }
+        Ok(ids)
+    }
+
+    fn nodes_in_communities(&self, community_ids: &[String]) -> Result<Vec<String>, TunnelError> {
+        let mut nodes = Vec::new();
+        for community_id in community_ids {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT node_id FROM kg_nodes WHERE community_id = ?1")
+                .map_err(|e| TunnelError::DatabaseError(e.to_string()))?;
+            let ids: Vec<String> = stmt
+                .query_map(params![community_id], |r| r.get(0))
+                .map_err(|e| TunnelError::DatabaseError(e.to_string()))?
+                .filter_map(|r| r.ok())
+                .collect();
+            nodes.extend(ids);
+        }
+        nodes.dedup();
+        Ok(nodes)
+    }
+
+    /// Spectral community detection sweep (R1). Recomputes `community_id`
+    /// for every node with at least one edge, from the current
+    /// `kg_edges` + `hyperedges` state. Scheduled as a periodic background
+    /// sweep alongside the other maintenance sweeps (same pattern as
+    /// `sweep_tiers`) — cheap enough for Venturi's typical graph sizes
+    /// (hundreds to low thousands of concepts), not run per-request.
+    pub fn detect_communities(&self) -> Result<SweepReport, TunnelError> {
+        let nodes = self.all_node_ids()?;
+        let edges = self.all_weighted_edges()?;
+
+        let detector = CommunityDetector::new(COMMUNITY_MAX_K);
+        let assignments = detector.detect(&nodes, &edges);
+
+        for (node_id, community_id) in &assignments {
+            self.conn
+                .execute(
+                    "UPDATE kg_nodes SET community_id = ?1 WHERE node_id = ?2",
+                    params![community_id, node_id],
+                )
+                .map_err(|e| TunnelError::DatabaseError(e.to_string()))?;
+        }
+
+        Ok(SweepReport {
+            sweep: "communities",
+            chains_affected: assignments.len() as u32,
+            orbs_ejected: 0,
+        })
+    }
+
+    fn all_node_ids(&self) -> Result<Vec<String>, TunnelError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT node_id FROM kg_nodes")
+            .map_err(|e| TunnelError::DatabaseError(e.to_string()))?;
+        let ids: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .map_err(|e| TunnelError::DatabaseError(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(ids)
+    }
+
+    /// Pairwise edges weighted by observation count (how many parent chains
+    /// contributed the same pair), plus hyperedges expanded into pairwise
+    /// weight contributions across every member pair — a hyperedge over
+    /// {A, B, C} strengthens A-B, A-C, and B-C alike, preserving the
+    /// co-occurrence signal `write_hyperedge` recorded.
+    fn all_weighted_edges(&self) -> Result<Vec<(String, String, f64)>, TunnelError> {
+        let mut edges = Vec::new();
+
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT from_node_id, to_node_id, COUNT(*) as cnt
+                 FROM kg_edges GROUP BY from_node_id, to_node_id",
+            )
+            .map_err(|e| TunnelError::DatabaseError(e.to_string()))?;
+        let pairwise: Vec<(String, String, f64)> = stmt
+            .query_map([], |r| {
+                let count: i64 = r.get(2)?;
+                Ok((r.get(0)?, r.get(1)?, count as f64))
+            })
+            .map_err(|e| TunnelError::DatabaseError(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .collect();
+        edges.extend(pairwise);
+
+        let mut stmt = self
+            .conn
+            .prepare("SELECT members, weight FROM hyperedges")
+            .map_err(|e| TunnelError::DatabaseError(e.to_string()))?;
+        let hyperedge_rows: Vec<(String, f64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(|e| TunnelError::DatabaseError(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .collect();
+        for (members_json, weight) in hyperedge_rows {
+            let members: Vec<String> = serde_json::from_str(&members_json).unwrap_or_default();
+            for i in 0..members.len() {
+                for j in (i + 1)..members.len() {
+                    edges.push((members[i].clone(), members[j].clone(), weight));
+                }
+            }
+        }
+
+        Ok(edges)
     }
 
     fn matching_nodes(&self, query: &str) -> Result<Vec<String>, TunnelError> {
@@ -586,5 +742,76 @@ mod tests {
             .unwrap();
 
         assert_eq!(count, 2);
+    }
+
+    /// R1: `detect_communities` should populate `community_id` for every node
+    /// that has at least one edge, from the current kg_edges/hyperedges state.
+    #[test]
+    fn detect_communities_populates_community_id_for_connected_nodes() {
+        let graph = KnowledgeGraph::open(":memory:", "http://127.0.0.1:9").unwrap();
+        graph
+            .ingest_summary("parent-1", "Alpha Beta Gamma Delta chain")
+            .unwrap();
+
+        let report = graph.detect_communities().unwrap();
+        assert_eq!(report.sweep, "communities");
+        assert_eq!(report.chains_affected, 4);
+
+        let assigned: i64 = graph
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM kg_nodes WHERE community_id IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(assigned, 4);
+    }
+
+    /// R1's value proposition: `traverse()` must find a concept that shares a
+    /// community with a matched anchor even when it's unreachable by BFS at
+    /// the caller's `max_hops` limit — here, 0 hops, and no shared edge at all.
+    #[test]
+    fn traverse_finds_community_linked_node_beyond_bfs_hop_limit() {
+        let graph = KnowledgeGraph::open(":memory:", "http://127.0.0.1:9").unwrap();
+        graph.ingest_summary("parent-gamma", "Gamma alone").unwrap();
+        graph.ingest_summary("parent-delta", "Delta alone").unwrap();
+
+        // Plain BFS (0 hops) only finds Gamma's own chain — no edge links them.
+        let bfs_only = graph.traverse("Gamma", 0).unwrap();
+        assert_eq!(bfs_only, vec!["parent-gamma".to_string()]);
+
+        // Simulate what a `detect_communities` sweep would find once the wider
+        // graph ties Gamma and Delta into the same community.
+        let gamma_id: String = graph
+            .conn
+            .query_row(
+                "SELECT node_id FROM kg_nodes WHERE entity = 'Gamma'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let delta_id: String = graph
+            .conn
+            .query_row(
+                "SELECT node_id FROM kg_nodes WHERE entity = 'Delta'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        graph
+            .conn
+            .execute(
+                "UPDATE kg_nodes SET community_id = 'c0' WHERE node_id IN (?1, ?2)",
+                params![gamma_id, delta_id],
+            )
+            .unwrap();
+
+        let mut with_community = graph.traverse("Gamma", 0).unwrap();
+        with_community.sort();
+        assert_eq!(
+            with_community,
+            vec!["parent-delta".to_string(), "parent-gamma".to_string()]
+        );
     }
 }

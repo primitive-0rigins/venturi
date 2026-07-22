@@ -870,6 +870,18 @@ impl Venturi {
         .sweep_lifecycle(&self.lifecycle)
     }
 
+    /// Run the spectral community detection sweep. Call every ~30 minutes.
+    pub fn sweep_communities(&self) -> Result<SweepReport, TunnelError> {
+        Sweeper::new(
+            self.gatekeeper.librarian(),
+            self.gatekeeper.keystore(),
+            self.gatekeeper.shelf(),
+            self.gatekeeper.graph(),
+            self.gatekeeper.scribe(),
+        )
+        .sweep_communities()
+    }
+
     pub fn record_daemon_health(
         &self,
         daemon: &str,

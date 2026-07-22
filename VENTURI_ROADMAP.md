@@ -191,6 +191,13 @@ explicit error category, Scribe records failure.
 ## Phase: ROADMAP
 
 ### R1 — Spectral Community Detection on Knowledge Graph
+**Status:** Implemented — `KnowledgeGraph::detect_communities()` builds the
+normalized Laplacian over `kg_edges` + `hyperedges`, clusters concepts via
+`CommunityDetector` (nalgebra eigendecomposition + deterministic k-means),
+and writes `community_id` on `kg_nodes`. `traverse()` gained a
+community-membership pass alongside BFS, run as a periodic background sweep
+(every 30 minutes) alongside the other sweeps.
+
 **Effort:** High (1–2 weeks) | **Value:** Very High
 **Source:** HypergraphPartitioning — SpectralPartitioning.jl, K_SpecPart algorithm
 
