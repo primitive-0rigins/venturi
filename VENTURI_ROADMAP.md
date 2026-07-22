@@ -314,7 +314,7 @@ Every retrieval result should be able to explain itself. Return alongside conten
 ```json
 {
   "retrieval_audit_id": "...",
-  "actor_id": "example-agent",
+  "actor_id": "agent-42",
   "mode": "consensus",
   "query": "patient chest pain admission",
   "filters_applied": {"domain": "medical"},
