@@ -1,18 +1,31 @@
-# VenturiUi
+# Venturi Operator Dashboard
 
-To start your Phoenix server:
+A read/light-write console over the [Venturi](../README.md) API: system
+health and capability status, retrieval audit proof lookup, chain reference
+viewing/linking, and legal hold placement/release. Every page is a thin view
+over routes that already exist on the Venturi API — this app adds no new
+backend surface.
 
-  * Run `mix setup` to install and setup dependencies
-  * Start Phoenix endpoint with `mix phx.server` or inside IEx with `iex -S mix phx.server`
+## Run locally
 
-Now you can visit [`localhost:4000`](http://localhost:4000) from your browser.
+Venturi itself must be running first (see the root README). Then:
 
-Ready to run in production? Please [check our deployment guides](https://hexdocs.pm/phoenix/deployment.html).
+```bash
+mix deps.get
+VENTURI_API_URL="http://127.0.0.1:9271" VENTURI_API_KEY="$VENTURI_ADMIN_KEY" mix phx.server
+```
 
-## Learn more
+Visit [`localhost:4000`](http://localhost:4000).
 
-  * Official website: https://www.phoenixframework.org/
-  * Guides: https://hexdocs.pm/phoenix/overview.html
-  * Docs: https://hexdocs.pm/phoenix
-  * Forum: https://elixirforum.com/c/phoenix-forum
-  * Source: https://github.com/phoenixframework/phoenix
+Environment variables:
+
+- `VENTURI_API_URL` — base URL of the Venturi API (default `http://localhost:8080`).
+- `VENTURI_API_KEY` — Bearer key sent on every request. Needs admin scope to
+  use the legal hold and chain link pages; a read-scoped key is enough for
+  health and audit lookup.
+
+## Verify
+
+```bash
+mix test
+```
