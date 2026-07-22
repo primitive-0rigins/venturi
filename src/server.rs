@@ -31,20 +31,24 @@ use std::time::{Duration, Instant};
 use venturi::auth::{configured_keys, required_scope, ApiKey};
 use venturi::{
     AnswerFact, ChainReference, ContentType, Foresight, ForesightRow, IngestionRequest, MetaRow,
-    RetrievalProof, StructuredFilter, SystemCapabilities, TunnelError, Venturi,
+    RetrievalProof, StructuredFilter, SystemCapabilities, TunnelError,
 };
+
+use crate::worker::{CommandSender, WorkerError};
 
 // ── Shared state ──────────────────────────────────────────────────────────────
 
-pub type SharedVenturi = Arc<Mutex<Venturi>>;
+/// Handle to the single-owner Venturi worker thread (see `src/worker.rs`).
+/// Cheaply cloneable — no `Arc` wrapper needed on top.
+pub type SharedVenturi = CommandSender;
 
 /// Lock a mutex, recovering from poisoning instead of panicking.
 ///
 /// A plain `.lock().unwrap()` turns any single panic under the lock into a
 /// permanent outage: the mutex stays poisoned forever, so every future
 /// request across every endpoint panics too, with no way back short of a
-/// process restart. The data behind the lock (Venturi, the rate limiter) is
-/// still perfectly usable after a poisoning panic — the panic just means one
+/// process restart. The data behind the lock (the rate limiter) is still
+/// perfectly usable after a poisoning panic — the panic just means one
 /// request didn't finish, not that the state is corrupt — so recovering the
 /// guard and carrying on is the safe default here.
 pub(crate) fn lock_mutex<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -554,12 +558,14 @@ pub struct OkResponse {
 
 // ── Route handlers ────────────────────────────────────────────────────────────
 
-async fn health(State(state): State<ServerState>) -> Json<HealthResponse> {
-    let capabilities = lock_mutex(&state.venturi).capabilities();
-    Json(HealthResponse {
+async fn health(
+    State(state): State<ServerState>,
+) -> Result<Json<HealthResponse>, (StatusCode, String)> {
+    let capabilities = state.venturi.capabilities().await.map_err(worker_error)?;
+    Ok(Json(HealthResponse {
         ok: true,
         capabilities: capabilities.into(),
-    })
+    }))
 }
 
 async fn ingest(
@@ -606,11 +612,7 @@ async fn ingest(
         chunks,
     };
 
-    let v = Arc::clone(&state.venturi);
-    let result = tokio::task::spawn_blocking(move || lock_mutex(&v).ingest(req))
-        .await
-        .map_err(join_error)?
-        .map_err(api_error)?;
+    let result = state.venturi.ingest(req).await.map_err(worker_error)?;
 
     Ok(Json(IngestResponse {
         orb_count: result.orb_ids.len(),
@@ -629,19 +631,17 @@ async fn retrieve_context(
         RateLimitedOp::Retrieval,
     )?;
 
-    let v = Arc::clone(&state.venturi);
-    let result = tokio::task::spawn_blocking(move || {
-        lock_mutex(&v).context_with_options_and_proof(
-            &body.query,
+    let result = state
+        .venturi
+        .context_with_options_and_proof(
+            body.query,
             body.top_k,
             body.max_tokens,
             body.check_stability,
-            body.agent_id.as_deref(),
+            body.agent_id,
         )
-    })
-    .await
-    .map_err(join_error)?
-    .map_err(api_error)?;
+        .await
+        .map_err(worker_error)?;
 
     let encoded: Vec<String> = result.value.iter().map(|c| base64_encode(c)).collect();
     let count = encoded.len();
@@ -666,17 +666,11 @@ async fn retrieve_document(
         RateLimitedOp::Retrieval,
     )?;
 
-    let v = Arc::clone(&state.venturi);
-    let result = tokio::task::spawn_blocking(move || {
-        lock_mutex(&v).document_with_budget_and_proof(
-            &body.query,
-            body.max_tokens,
-            body.agent_id.as_deref(),
-        )
-    })
-    .await
-    .map_err(join_error)?
-    .map_err(api_error)?;
+    let result = state
+        .venturi
+        .document_with_budget_and_proof(body.query, body.max_tokens, body.agent_id)
+        .await
+        .map_err(worker_error)?;
 
     let size = result.value.len();
     Ok(Json(DocumentResponse {
@@ -695,13 +689,11 @@ async fn retrieve_document_by_id(
 ) -> Result<Json<DocumentResponse>, (StatusCode, String)> {
     enforce_rate_limit(&state, "anonymous", RateLimitedOp::Retrieval)?;
 
-    let v = Arc::clone(&state.venturi);
-    let result = tokio::task::spawn_blocking(move || {
-        lock_mutex(&v).document_by_parent_id_with_proof(&parent_id, None)
-    })
-    .await
-    .map_err(join_error)?
-    .map_err(api_error)?;
+    let result = state
+        .venturi
+        .document_by_parent_id_with_proof(parent_id, None)
+        .await
+        .map_err(worker_error)?;
 
     let size = result.value.len();
     Ok(Json(DocumentResponse {
@@ -724,13 +716,11 @@ async fn retrieve_graph(
         RateLimitedOp::Retrieval,
     )?;
 
-    let v = Arc::clone(&state.venturi);
-    let result = tokio::task::spawn_blocking(move || {
-        lock_mutex(&v).graph_query_with_proof(&body.query, body.max_hops, body.agent_id.as_deref())
-    })
-    .await
-    .map_err(join_error)?
-    .map_err(api_error)?;
+    let result = state
+        .venturi
+        .graph_query_with_proof(body.query, body.max_hops, body.agent_id)
+        .await
+        .map_err(worker_error)?;
 
     let encoded: Vec<String> = result.value.iter().map(|c| base64_encode(c)).collect();
     let count = encoded.len();
@@ -755,19 +745,17 @@ async fn retrieve_consensus(
         RateLimitedOp::Retrieval,
     )?;
 
-    let v = Arc::clone(&state.venturi);
-    let result = tokio::task::spawn_blocking(move || {
-        lock_mutex(&v).consensus(
-            &body.query,
-            &body.modes,
+    let result = state
+        .venturi
+        .consensus(
+            body.query,
+            body.modes,
             body.top_k,
             body.max_hops,
-            body.agent_id.as_deref(),
+            body.agent_id,
         )
-    })
-    .await
-    .map_err(join_error)?
-    .map_err(api_error)?;
+        .await
+        .map_err(worker_error)?;
 
     let core_chunks: Vec<String> = result
         .core_chunks
@@ -803,19 +791,11 @@ async fn retrieve_temporal(
         RateLimitedOp::Retrieval,
     )?;
 
-    let v = Arc::clone(&state.venturi);
-    let result = tokio::task::spawn_blocking(move || {
-        lock_mutex(&v).temporal_with_budget_and_proof(
-            &body.subject,
-            &body.from,
-            &body.to,
-            body.max_tokens,
-            body.agent_id.as_deref(),
-        )
-    })
-    .await
-    .map_err(join_error)?
-    .map_err(api_error)?;
+    let result = state
+        .venturi
+        .temporal_with_budget_and_proof(body.subject, body.from, body.to, body.max_tokens, body.agent_id)
+        .await
+        .map_err(worker_error)?;
 
     let encoded: Vec<String> = result.value.iter().map(|c| base64_encode(c)).collect();
     let count = encoded.len();
@@ -851,17 +831,11 @@ async fn retrieve_structured(
         date_to: body.date_to,
     };
 
-    let v = Arc::clone(&state.venturi);
-    let result = tokio::task::spawn_blocking(move || {
-        lock_mutex(&v).structured_with_budget_and_proof(
-            filter,
-            body.max_tokens,
-            body.agent_id.as_deref(),
-        )
-    })
-    .await
-    .map_err(join_error)?
-    .map_err(api_error)?;
+    let result = state
+        .venturi
+        .structured_with_budget_and_proof(filter, body.max_tokens, body.agent_id)
+        .await
+        .map_err(worker_error)?;
 
     let encoded: Vec<String> = result.value.iter().map(|c| base64_encode(c)).collect();
     let count = encoded.len();
@@ -897,13 +871,11 @@ async fn retrieve_metadata(
         date_to: body.date_to,
     };
 
-    let v = Arc::clone(&state.venturi);
-    let result = tokio::task::spawn_blocking(move || {
-        lock_mutex(&v).metadata_with_proof(filter, body.agent_id.as_deref())
-    })
-    .await
-    .map_err(join_error)?
-    .map_err(api_error)?;
+    let result = state
+        .venturi
+        .metadata_with_proof(filter, body.agent_id)
+        .await
+        .map_err(worker_error)?;
 
     let count = result.value.len();
     Ok(Json(MetadataResponse {
@@ -917,18 +889,16 @@ async fn verdict(
     State(state): State<ServerState>,
     Json(body): Json<VerdictBody>,
 ) -> Result<Json<OkResponse>, (StatusCode, String)> {
-    let v = Arc::clone(&state.venturi);
-    tokio::task::spawn_blocking(move || {
-        lock_mutex(&v).record_verdict(
-            &body.parent_id,
-            &body.orb_ids,
-            &body.expected_orb_ids,
+    state
+        .venturi
+        .record_verdict(
+            body.parent_id,
+            body.orb_ids,
+            body.expected_orb_ids,
             body.verdict,
         )
-    })
-    .await
-    .map_err(join_error)?
-    .map_err(api_error)?;
+        .await
+        .map_err(worker_error)?;
 
     Ok(Json(OkResponse { ok: true }))
 }
@@ -939,20 +909,19 @@ async fn audit(
 ) -> Result<Json<AuditResponse>, (StatusCode, String)> {
     enforce_rate_limit(&state, "anonymous", RateLimitedOp::Retrieval)?;
 
-    let v = Arc::clone(&state.venturi);
-    let proof =
-        tokio::task::spawn_blocking(move || lock_mutex(&v).retrieval_proof(&retrieval_audit_id))
-            .await
-            .map_err(join_error)?
-            .map_err(api_error)?
-            .ok_or_else(|| {
-                let body = serde_json::json!({
-                    "ok": false,
-                    "category": "audit_not_found",
-                    "error": "retrieval proof not found",
-                });
-                (StatusCode::NOT_FOUND, body.to_string())
-            })?;
+    let proof = state
+        .venturi
+        .retrieval_proof(retrieval_audit_id)
+        .await
+        .map_err(worker_error)?
+        .ok_or_else(|| {
+            let body = serde_json::json!({
+                "ok": false,
+                "category": "audit_not_found",
+                "error": "retrieval proof not found",
+            });
+            (StatusCode::NOT_FOUND, body.to_string())
+        })?;
 
     Ok(Json(AuditResponse { proof }))
 }
@@ -961,13 +930,11 @@ async fn hold(
     State(state): State<ServerState>,
     Json(body): Json<HoldBody>,
 ) -> Result<Json<OkResponse>, (StatusCode, String)> {
-    let v = Arc::clone(&state.venturi);
-    tokio::task::spawn_blocking(move || {
-        lock_mutex(&v).set_legal_hold(&body.parent_id, &body.reason)
-    })
-    .await
-    .map_err(join_error)?
-    .map_err(api_error)?;
+    state
+        .venturi
+        .set_legal_hold(body.parent_id, body.reason)
+        .await
+        .map_err(worker_error)?;
 
     Ok(Json(OkResponse { ok: true }))
 }
@@ -976,11 +943,11 @@ async fn release_hold(
     State(state): State<ServerState>,
     Path(parent_id): Path<String>,
 ) -> Result<Json<OkResponse>, (StatusCode, String)> {
-    let v = Arc::clone(&state.venturi);
-    tokio::task::spawn_blocking(move || lock_mutex(&v).release_legal_hold(&parent_id))
+    state
+        .venturi
+        .release_legal_hold(parent_id)
         .await
-        .map_err(join_error)?
-        .map_err(api_error)?;
+        .map_err(worker_error)?;
 
     Ok(Json(OkResponse { ok: true }))
 }
@@ -989,17 +956,11 @@ async fn link_chain(
     State(state): State<ServerState>,
     Json(body): Json<ChainLinkBody>,
 ) -> Result<Json<OkResponse>, (StatusCode, String)> {
-    let v = Arc::clone(&state.venturi);
-    tokio::task::spawn_blocking(move || {
-        lock_mutex(&v).link_chains(
-            &body.from_parent_id,
-            &body.to_parent_id,
-            &body.reference_type,
-        )
-    })
-    .await
-    .map_err(join_error)?
-    .map_err(api_error)?;
+    state
+        .venturi
+        .link_chains(body.from_parent_id, body.to_parent_id, body.reference_type)
+        .await
+        .map_err(worker_error)?;
 
     Ok(Json(OkResponse { ok: true }))
 }
@@ -1008,12 +969,11 @@ async fn chain_references(
     State(state): State<ServerState>,
     Path(parent_id): Path<String>,
 ) -> Result<Json<ChainReferencesResponse>, (StatusCode, String)> {
-    let v = Arc::clone(&state.venturi);
-    let references =
-        tokio::task::spawn_blocking(move || lock_mutex(&v).chain_references(&parent_id))
-            .await
-            .map_err(join_error)?
-            .map_err(api_error)?;
+    let references = state
+        .venturi
+        .chain_references(parent_id)
+        .await
+        .map_err(worker_error)?;
     let count = references.len();
 
     Ok(Json(ChainReferencesResponse {
@@ -1030,11 +990,11 @@ async fn retrieve_foresights(
     Query(query): Query<ForesightQuery>,
 ) -> Result<Json<ForesightsResponse>, (StatusCode, String)> {
     enforce_rate_limit(&state, "anonymous", RateLimitedOp::Retrieval)?;
-    let v = Arc::clone(&state.venturi);
-    let foresights = tokio::task::spawn_blocking(move || lock_mutex(&v).foresights(&query.on))
+    let foresights = state
+        .venturi
+        .foresights(query.on)
         .await
-        .map_err(join_error)?
-        .map_err(api_error)?;
+        .map_err(worker_error)?;
     let count = foresights.len();
 
     Ok(Json(ForesightsResponse {
@@ -1043,13 +1003,19 @@ async fn retrieve_foresights(
     }))
 }
 
-fn join_error(error: tokio::task::JoinError) -> (StatusCode, String) {
-    let body = serde_json::json!({
-        "ok": false,
-        "category": "internal_error",
-        "error": error.to_string(),
-    });
-    (StatusCode::INTERNAL_SERVER_ERROR, body.to_string())
+fn worker_error(error: WorkerError) -> (StatusCode, String) {
+    match error {
+        WorkerError::Tunnel(error) => api_error(error),
+        WorkerError::Overloaded { retry_after_ms } => overloaded_error(retry_after_ms),
+        WorkerError::Unavailable => {
+            let body = serde_json::json!({
+                "ok": false,
+                "category": "internal_error",
+                "error": "venturi worker unavailable",
+            });
+            (StatusCode::INTERNAL_SERVER_ERROR, body.to_string())
+        }
+    }
 }
 
 fn enforce_rate_limit(
@@ -1302,7 +1268,7 @@ mod tests {
     use axum::http::Request as HttpRequest;
     use tower::ServiceExt;
     use venturi::auth::Scope;
-    use venturi::{StorageLimits, VenturiConfig};
+    use venturi::{StorageLimits, Venturi, VenturiConfig};
 
     fn test_router(api_keys: Vec<ApiKey>) -> (Router, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -1321,7 +1287,8 @@ mod tests {
             limits: StorageLimits::default(),
         };
         let venturi = Venturi::open(config).unwrap();
-        let state = ServerState::with_api_keys(Arc::new(Mutex::new(venturi)), api_keys);
+        let sender = crate::worker::spawn_worker(venturi);
+        let state = ServerState::with_api_keys(sender, api_keys);
         (build_router_with_state(state), dir)
     }
 

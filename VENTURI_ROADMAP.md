@@ -266,6 +266,17 @@ contexts.
 ---
 
 ### R2 — Single Owner Worker (Channel-Based SQLite)
+**Status:** Implemented — `src/worker.rs` spawns one dedicated OS thread that
+owns `Venturi` outright. HTTP handlers and background sweeps send a
+`VenturiCommand` over a bounded `tokio::sync::mpsc` channel and await a
+oneshot reply instead of locking a shared mutex. `SharedVenturi` is now the
+cheaply-cloneable `CommandSender` handle (no `Arc` wrapper needed — the
+channel sender is already reference-counted internally). A full channel
+returns `WorkerError::Overloaded`, mapped to the same 429 `overloaded`
+response shape the per-agent rate limiter already used. External API
+behavior (routes, request/response shapes, status codes, auth ordering) is
+unchanged.
+
 **Effort:** High (1 week) | **Value:** High
 **Source:** Design notes — "Use a Single Owner Worker for SQLite First"
 

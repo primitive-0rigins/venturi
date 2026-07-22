@@ -1,11 +1,13 @@
 mod server;
+mod worker;
 
-use server::{build_router, lock_mutex, SharedVenturi};
+use server::{build_router, SharedVenturi};
 use std::env;
-use std::sync::{Arc, Mutex};
+use std::future::Future;
 use std::time::Duration;
 use venturi::pipeline::sweep::SweepReport;
-use venturi::{LifecycleConfig, StorageLimits, TunnelError, Venturi, VenturiConfig};
+use venturi::{LifecycleConfig, StorageLimits, Venturi, VenturiConfig};
+use worker::WorkerError;
 
 #[tokio::main]
 async fn main() {
@@ -29,9 +31,9 @@ async fn main() {
     });
 
     let venturi = open_venturi(&data_dir);
-    let shared: SharedVenturi = Arc::new(Mutex::new(venturi));
+    let shared: SharedVenturi = worker::spawn_worker(venturi);
 
-    spawn_sweeps(Arc::clone(&shared));
+    spawn_sweeps(shared.clone());
 
     let app = build_router(shared);
     let addr = format!("127.0.0.1:{}", port);
@@ -78,76 +80,75 @@ fn open_venturi(data_dir: &str) -> Venturi {
 }
 
 /// Spawn the background maintenance tasks.
-/// Each shares the same Arc — sweep timers are offset so they don't
-/// all fire at once after a restart.
+/// Each clones the same cheap `CommandSender` handle — sweep timers are
+/// offset so they don't all fire at once after a restart.
 fn spawn_sweeps(shared: SharedVenturi) {
     // Sweep 1: sibling refresh — every 5 minutes
     spawn_skipped_interval(
-        Arc::clone(&shared),
+        shared.clone(),
         "access_marks",
         Duration::from_secs(5 * 60),
         false,
-        |v| v.sweep_access_marks(),
+        |v| async move { v.sweep_access_marks().await },
     );
 
     // Sweep 2: tier update — every 15 minutes
     spawn_skipped_interval(
-        Arc::clone(&shared),
+        shared.clone(),
         "tiers",
         Duration::from_secs(15 * 60),
         false,
-        |v| v.sweep_tiers(),
+        |v| async move { v.sweep_tiers().await },
     );
 
     // Sweep 3: 90-day expiry — once daily
     spawn_skipped_interval(
-        Arc::clone(&shared),
+        shared.clone(),
         "expiry",
         Duration::from_secs(24 * 60 * 60),
         false,
-        |v| v.sweep_expiry(),
+        |v| async move { v.sweep_expiry().await },
     );
 
     // Sweep 4: lifecycle manager — every 60 seconds
     spawn_skipped_interval(
-        Arc::clone(&shared),
+        shared.clone(),
         "lifecycle",
         Duration::from_secs(60),
         true,
-        |v| v.lifecycle_sweep(),
+        |v| async move { v.lifecycle_sweep().await },
     );
 
     // Sweep 5: spectral community detection — every 30 minutes
     spawn_skipped_interval(
-        Arc::clone(&shared),
+        shared.clone(),
         "communities",
         Duration::from_secs(30 * 60),
         false,
-        |v| v.sweep_communities(),
+        |v| async move { v.sweep_communities().await },
     );
 
     // Sweep 6: embedding queue — every 30 seconds, no initial skip
     // Processes leftover queue items immediately on startup, then on interval.
-    let v = Arc::clone(&shared);
+    let v = shared.clone();
     tokio::spawn(async move {
         let mut t = tokio::time::interval(Duration::from_secs(30));
         loop {
             t.tick().await;
-            let v2 = Arc::clone(&v);
-            let _ = tokio::task::spawn_blocking(move || lock_mutex(&v2).process_embedding_queue())
-                .await;
+            let _ = v.process_embedding_queue().await;
         }
     });
 }
 
-fn spawn_skipped_interval<F>(
+fn spawn_skipped_interval<F, Fut>(
     shared: SharedVenturi,
     name: &'static str,
     interval: Duration,
     disable_after_failures: bool,
     sweep: F,
 ) where
-    F: Fn(&Venturi) -> Result<SweepReport, TunnelError> + Send + Sync + Copy + 'static,
+    F: Fn(SharedVenturi) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<SweepReport, WorkerError>> + Send,
 {
     tokio::spawn(async move {
         let mut t = tokio::time::interval(interval);
@@ -159,32 +160,27 @@ fn spawn_skipped_interval<F>(
             if disabled {
                 continue;
             }
-            let v = Arc::clone(&shared);
-            let outcome = tokio::task::spawn_blocking(move || {
-                let guard = lock_mutex(&v);
-                let result = sweep(&guard);
-                record_sweep_health(&guard, name, &result, failures);
-                result
-            })
-            .await;
+            let result = sweep(shared.clone()).await;
+            record_sweep_health(&shared, name, &result, failures).await;
 
-            match outcome {
-                Ok(Ok(_)) => failures = 0,
-                Ok(Err(_)) | Err(_) => failures = failures.saturating_add(1),
+            match result {
+                Ok(_) => failures = 0,
+                Err(_) => failures = failures.saturating_add(1),
             }
             if disable_after_failures && failures >= 3 {
                 disabled = true;
-                let guard = lock_mutex(&shared);
-                let _ = guard.record_daemon_health(name, "disabled", failures, None);
+                let _ = shared
+                    .record_daemon_health(name.to_string(), "disabled".to_string(), failures, None)
+                    .await;
             }
         }
     });
 }
 
-fn record_sweep_health(
-    venturi: &Venturi,
+async fn record_sweep_health(
+    shared: &SharedVenturi,
     name: &str,
-    result: &Result<SweepReport, TunnelError>,
+    result: &Result<SweepReport, WorkerError>,
     prior_failures: u8,
 ) {
     match result {
@@ -193,12 +189,16 @@ fn record_sweep_health(
                 "chains_affected={} orbs_ejected={}",
                 report.chains_affected, report.orbs_ejected
             );
-            let _ = venturi.record_daemon_health(name, "ok", 0, Some(&details));
+            let _ = shared
+                .record_daemon_health(name.to_string(), "ok".to_string(), 0, Some(details))
+                .await;
         }
         Err(error) => {
             let failures = prior_failures.saturating_add(1);
             let details = error.to_string();
-            let _ = venturi.record_daemon_health(name, "error", failures, Some(&details));
+            let _ = shared
+                .record_daemon_health(name.to_string(), "error".to_string(), failures, Some(details))
+                .await;
         }
     }
 }
