@@ -40,8 +40,11 @@ impl CommunityDetector {
             return HashMap::new();
         }
 
-        let index: HashMap<&str, usize> =
-            nodes.iter().enumerate().map(|(i, id)| (id.as_str(), i)).collect();
+        let index: HashMap<&str, usize> = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.as_str(), i))
+            .collect();
 
         let mut adjacency = DMatrix::<f64>::zeros(n, n);
         for (from, to, weight) in edges {
@@ -93,7 +96,12 @@ impl CommunityDetector {
         }
 
         let coords: Vec<Vec<f64>> = (0..n)
-            .map(|i| coord_indices.iter().map(|&c| eigen.eigenvectors[(i, c)]).collect())
+            .map(|i| {
+                coord_indices
+                    .iter()
+                    .map(|&c| eigen.eigenvectors[(i, c)])
+                    .collect()
+            })
             .collect();
 
         let assignments = kmeans(&coords, k);
@@ -121,8 +129,7 @@ fn kmeans(coords: &[Vec<f64>], k: usize) -> Vec<usize> {
             .partial_cmp(&coords[b][0])
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    let mut centroids: Vec<Vec<f64>> =
-        (0..k).map(|c| coords[order[c * n / k]].clone()).collect();
+    let mut centroids: Vec<Vec<f64>> = (0..k).map(|c| coords[order[c * n / k]].clone()).collect();
 
     let mut assignments = vec![0usize; n];
     for _ in 0..50 {
@@ -131,7 +138,9 @@ fn kmeans(coords: &[Vec<f64>], k: usize) -> Vec<usize> {
             let mut best = 0;
             let mut best_dist = f64::MAX;
             for (c, centroid) in centroids.iter().enumerate() {
-                let dist: f64 = (0..dims).map(|d| (coords[i][d] - centroid[d]).powi(2)).sum();
+                let dist: f64 = (0..dims)
+                    .map(|d| (coords[i][d] - centroid[d]).powi(2))
+                    .sum();
                 if dist < best_dist {
                     best_dist = dist;
                     best = c;

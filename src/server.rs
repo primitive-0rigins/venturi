@@ -835,10 +835,7 @@ async fn retrieve_document_stream(
         warnings: Vec::new(),
         finished: false,
     };
-    let body = Body::from_stream(futures_util::stream::unfold(
-        initial,
-        document_stream_next,
-    ));
+    let body = Body::from_stream(futures_util::stream::unfold(initial, document_stream_next));
 
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -934,7 +931,13 @@ async fn retrieve_temporal(
 
     let result = state
         .venturi
-        .temporal_with_budget_and_proof(body.subject, body.from, body.to, body.max_tokens, body.agent_id)
+        .temporal_with_budget_and_proof(
+            body.subject,
+            body.from,
+            body.to,
+            body.max_tokens,
+            body.agent_id,
+        )
         .await
         .map_err(worker_error)?;
 
@@ -1451,7 +1454,10 @@ mod tests {
     #[tokio::test]
     async fn health_requires_no_key() {
         let (router, _dir) = test_router(vec![]);
-        let response = router.oneshot(request("GET", "/health", None)).await.unwrap();
+        let response = router
+            .oneshot(request("GET", "/health", None))
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }
 
@@ -1525,7 +1531,12 @@ mod tests {
 
     // ── streamed document retrieval (roadmap B2) ──────────────────────────
 
-    fn json_request(method: &str, path: &str, key: &str, body: serde_json::Value) -> HttpRequest<Body> {
+    fn json_request(
+        method: &str,
+        path: &str,
+        key: &str,
+        body: serde_json::Value,
+    ) -> HttpRequest<Body> {
         HttpRequest::builder()
             .method(method)
             .uri(path)

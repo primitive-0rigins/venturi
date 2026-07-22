@@ -21,8 +21,7 @@ use tokio::sync::{mpsc, oneshot};
 use venturi::pipeline::sweep::SweepReport;
 use venturi::{
     ChainReference, ConsensusResult, ForesightRow, IngestionRequest, IngestionResult, MetaRow,
-    RetrievalProof, RetrievalWithProof, StructuredFilter, SystemCapabilities, TunnelError,
-    Venturi,
+    RetrievalProof, RetrievalWithProof, StructuredFilter, SystemCapabilities, TunnelError, Venturi,
 };
 
 /// Bounded channel capacity. A single worker thread processing SQLite
@@ -43,7 +42,9 @@ const OVERLOADED_RETRY_AFTER_MS: u64 = 250;
 pub enum WorkerError {
     Tunnel(TunnelError),
     /// Channel is at capacity — caller should back off and retry.
-    Overloaded { retry_after_ms: u64 },
+    Overloaded {
+        retry_after_ms: u64,
+    },
     /// The worker thread is gone (send failed, or it dropped a reply sender
     /// without responding — only possible if the worker itself panicked).
     Unavailable,
@@ -287,7 +288,10 @@ impl CommandSender {
 
     /// Ordered orb ids for a chain (roadmap B2 streaming) — the cheap first
     /// step of a streamed document retrieval.
-    pub async fn document_chain_orb_ids(&self, parent_id: String) -> Result<Vec<String>, WorkerError> {
+    pub async fn document_chain_orb_ids(
+        &self,
+        parent_id: String,
+    ) -> Result<Vec<String>, WorkerError> {
         self.call(|reply| VenturiCommand::DocumentChainOrbIds { parent_id, reply })
             .await
     }
@@ -580,9 +584,8 @@ fn handle_command(venturi: &mut Venturi, cmd: VenturiCommand) {
             agent_id,
             reply,
         } => {
-            let _ = reply.send(
-                venturi.document_by_parent_id_with_proof(&parent_id, agent_id.as_deref()),
-            );
+            let _ = reply
+                .send(venturi.document_by_parent_id_with_proof(&parent_id, agent_id.as_deref()));
         }
         VenturiCommand::DocumentChainOrbIds { parent_id, reply } => {
             let _ = reply.send(venturi.document_chain_orb_ids(&parent_id));
@@ -621,7 +624,8 @@ fn handle_command(venturi: &mut Venturi, cmd: VenturiCommand) {
             agent_id,
             reply,
         } => {
-            let _ = reply.send(venturi.consensus(&query, &modes, top_k, max_hops, agent_id.as_deref()));
+            let _ =
+                reply.send(venturi.consensus(&query, &modes, top_k, max_hops, agent_id.as_deref()));
         }
         VenturiCommand::TemporalWithBudgetAndProof {
             subject,

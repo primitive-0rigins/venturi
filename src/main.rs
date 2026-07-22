@@ -197,7 +197,12 @@ async fn record_sweep_health(
             let failures = prior_failures.saturating_add(1);
             let details = error.to_string();
             let _ = shared
-                .record_daemon_health(name.to_string(), "error".to_string(), failures, Some(details))
+                .record_daemon_health(
+                    name.to_string(),
+                    "error".to_string(),
+                    failures,
+                    Some(details),
+                )
                 .await;
         }
     }
