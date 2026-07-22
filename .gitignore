@@ -1,0 +1,14 @@
+/target/
+
+# Local runtime state. It can contain encrypted memory, encryption keys, and audit records.
+/venturi-data/
+/orb-shelf/
+/datasets/
+*.db
+*.db-shm
+*.db-wal
+*.orb
+*.key
+*.pem
+.env
+.env.*
