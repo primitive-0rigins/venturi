@@ -2,6 +2,8 @@
 name = "venturi"
 version = "0.1.0"
 edition = "2021"
+description = "Local, encrypted, governed memory infrastructure for AI agents"
+license = "MIT"
 
 [[bin]]
 name = "venturi"

@@ -1,6 +1,6 @@
 # VENTURI — Engineering Roadmap
 
-**Status:** Living document — updated as zip analysis sessions complete.
+**Status:** Living document — updated as engineering review passes complete.
 **Philosophy:** Accuracy over speed. Regulated industries (healthcare, legal, finance) need correct
 retrieval more than fast retrieval. Speed is optimized after correctness is proven.
 
@@ -820,7 +820,9 @@ lineage.
 
 Venturi's librarian and gatekeeper both run a permanent embedding sidecar —
 currently nomic-embed-text, a general-purpose model. This sidecar is not static.
-It is the most natural application of a self-improving retrieval loop.
+It is the most natural application of a self-improving retrieval loop, where
+usage data continuously trains a better embedding model than the general-purpose
+default.
 
 **The evolution path:**
 
