@@ -6,11 +6,13 @@ SQLite, and rehydrates the original bytes on retrieval.
 
 ## Run locally
 
-Venturi requires a local Ollama-compatible embedding service. By default it
+Venturi requires a local Ollama-compatible embedding service and an
+administrator API key. By default it
 uses `http://localhost:11434`, stores state in `~/venturi-data`, and listens
 only on `127.0.0.1:9271`.
 
 ```bash
+export VENTURI_ADMIN_KEY="replace-with-a-long-random-secret"
 cargo run --release
 ```
 
@@ -20,14 +22,16 @@ Optional environment variables:
 - `VENTURI_PORT` — localhost HTTP port (default `9271`).
 - `VENTURI_OLLAMA` — local embedding service URL.
 - `VENTURI_EMBEDDING_MODEL` and `VENTURI_EMBEDDING_DIM` — embedding settings.
+- `VENTURI_ADMIN_KEY` — required administrator key. Venturi refuses to start
+  without it.
 
 ## Security boundary
 
-Venturi encrypts stored content and keeps its HTTP server bound to localhost.
-Its API does not authenticate callers: any local process that can reach the
-server can access the memory it is permitted to request. Keep the data
-directory private, do not commit it, and put authentication and network access
-control in front of Venturi before exposing it beyond the local machine.
+Venturi encrypts stored content, keeps its HTTP server bound to localhost, and
+requires a Bearer API key for every memory operation. An administrator key is
+required at startup; it can issue scoped agent keys for read, write, or full
+administrative access. Keep keys and the data directory private. If you expose
+Venturi beyond the local machine, put it behind TLS and a network boundary.
 
 ## Verify
 

@@ -1,6 +1,7 @@
 // Venturi — encrypted governed agent memory infrastructure
 
 // Foundational types (most imported, no internal deps):
+pub mod auth;
 pub mod types;
 
 // Storage layer (imports types only):

@@ -9,6 +9,13 @@ use venturi::{LifecycleConfig, StorageLimits, TunnelError, Venturi, VenturiConfi
 
 #[tokio::main]
 async fn main() {
+    if env::var("VENTURI_ADMIN_KEY")
+        .map(|key| key.trim().is_empty())
+        .unwrap_or(true)
+    {
+        eprintln!("VENTURI_ADMIN_KEY is required; refusing to start without authentication.");
+        std::process::exit(2);
+    }
     let port = env::var("VENTURI_PORT")
         .ok()
         .and_then(|p| p.parse::<u16>().ok())

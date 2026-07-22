@@ -1,7 +1,8 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query, Request, State},
     http::StatusCode,
-    response::Json,
+    middleware::{self, Next},
+    response::{Json, Response},
     routing::{get, post},
     Router,
 };
@@ -9,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 /// HTTP server — exposes Venturi over localhost JSON API.
 ///
-/// All agents (agents) call this over HTTP.
+/// All calling agents talk to it over HTTP.
 /// One Venturi process, one port (default 9271), all agents share it.
 ///
 /// Endpoints:
@@ -27,6 +28,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use venturi::auth::{configured_keys, required_scope, ApiKey};
 use venturi::{
     AnswerFact, ChainReference, ContentType, Foresight, ForesightRow, IngestionRequest, MetaRow,
     RetrievalProof, StructuredFilter, SystemCapabilities, TunnelError, Venturi,
@@ -56,6 +58,7 @@ pub struct ServerState {
     venturi: SharedVenturi,
     limiter: Arc<Mutex<RateLimiter>>,
     rate_limits: RateLimitConfig,
+    api_keys: Arc<Vec<ApiKey>>,
 }
 
 impl ServerState {
@@ -68,8 +71,43 @@ impl ServerState {
             venturi,
             limiter: Arc::new(Mutex::new(RateLimiter::new())),
             rate_limits,
+            api_keys: Arc::new(configured_keys()),
         }
     }
+
+    /// Bypasses env-var key loading so tests can inject keys directly instead
+    /// of mutating process-wide state.
+    #[cfg(test)]
+    fn with_api_keys(venturi: SharedVenturi, api_keys: Vec<ApiKey>) -> Self {
+        Self {
+            venturi,
+            limiter: Arc::new(Mutex::new(RateLimiter::new())),
+            rate_limits: RateLimitConfig::default(),
+            api_keys: Arc::new(api_keys),
+        }
+    }
+}
+
+async fn require_api_key(
+    State(state): State<ServerState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let token = request
+        .headers()
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let allowed = token.is_some_and(|token| {
+        state
+            .api_keys
+            .iter()
+            .any(|key| key.value == token && key.scope.allows(required_scope(request.uri().path())))
+    });
+    if !allowed {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(next.run(request).await)
 }
 
 #[derive(Clone, Copy)]
@@ -1082,8 +1120,7 @@ pub fn build_router(state: SharedVenturi) -> Router {
 }
 
 fn build_router_with_state(state: ServerState) -> Router {
-    Router::new()
-        .route("/health", get(health))
+    let protected = Router::new()
         .route("/ingest", post(ingest))
         .route("/retrieve/context", post(retrieve_context))
         .route("/retrieve/document", post(retrieve_document))
@@ -1103,6 +1140,13 @@ fn build_router_with_state(state: ServerState) -> Router {
         .route("/chain/link", post(link_chain))
         .route("/chain/references/:parent_id", get(chain_references))
         .route("/retrieve/foresights", get(retrieve_foresights))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_api_key,
+        ));
+    Router::new()
+        .route("/health", get(health))
+        .merge(protected)
         .with_state(state)
 }
 
@@ -1250,5 +1294,120 @@ mod tests {
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(parsed["category"], "overloaded");
         assert_eq!(parsed["retry_after_ms"], 2500);
+    }
+
+    // ── auth middleware ────────────────────────────────────────────────────
+
+    use axum::body::Body;
+    use axum::http::Request as HttpRequest;
+    use tower::ServiceExt;
+    use venturi::auth::Scope;
+    use venturi::{StorageLimits, VenturiConfig};
+
+    fn test_router(api_keys: Vec<ApiKey>) -> (Router, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let config = VenturiConfig {
+            shelf_root: format!("{root}/shelf"),
+            journal_db: format!("{root}/journal.db"),
+            keystore_db: format!("{root}/keystore.db"),
+            librarian_db: format!("{root}/librarian.db"),
+            scribe_db: format!("{root}/scribe.db"),
+            graph_db: format!("{root}/graph.db"),
+            ollama_url: "http://localhost:11434".to_string(),
+            embedding_model: None,
+            embedding_dim: None,
+            lifecycle: None,
+            limits: StorageLimits::default(),
+        };
+        let venturi = Venturi::open(config).unwrap();
+        let state = ServerState::with_api_keys(Arc::new(Mutex::new(venturi)), api_keys);
+        (build_router_with_state(state), dir)
+    }
+
+    fn request(method: &str, path: &str, auth: Option<&str>) -> HttpRequest<Body> {
+        let mut builder = HttpRequest::builder().method(method).uri(path);
+        if let Some(token) = auth {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        builder
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn health_requires_no_key() {
+        let (router, _dir) = test_router(vec![]);
+        let response = router.oneshot(request("GET", "/health", None)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn protected_route_without_key_is_rejected() {
+        let (router, _dir) = test_router(vec![]);
+        let response = router
+            .oneshot(request("POST", "/ingest", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn protected_route_with_wrong_key_is_rejected() {
+        let (router, _dir) = test_router(vec![ApiKey {
+            value: "correct-key".to_string(),
+            scope: Scope::Admin,
+        }]);
+        let response = router
+            .oneshot(request("POST", "/ingest", Some("wrong-key")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_key_passes_middleware_on_write_route() {
+        let (router, _dir) = test_router(vec![ApiKey {
+            value: "admin-key".to_string(),
+            scope: Scope::Admin,
+        }]);
+        let response = router
+            .oneshot(request("POST", "/ingest", Some("admin-key")))
+            .await
+            .unwrap();
+        // The malformed body will fail validation past the middleware, but it
+        // must not be UNAUTHORIZED — proves the key was accepted.
+        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn read_scoped_key_is_rejected_on_write_route() {
+        let (router, _dir) = test_router(vec![ApiKey {
+            value: "read-key".to_string(),
+            scope: Scope::Read,
+        }]);
+        let response = router
+            .oneshot(request("POST", "/ingest", Some("read-key")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn read_scoped_key_passes_middleware_on_read_route() {
+        let (router, _dir) = test_router(vec![ApiKey {
+            value: "read-key".to_string(),
+            scope: Scope::Read,
+        }]);
+        let response = router
+            .oneshot(request(
+                "GET",
+                "/retrieve/document/some-parent-id",
+                Some("read-key"),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }
