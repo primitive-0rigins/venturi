@@ -105,10 +105,12 @@ fn assert_secret_direct_only(v: &Venturi, secret: &venturi::IngestionResult) {
     assert_eq!(direct_rows[0].classification, "secret");
 }
 
-#[test]
-fn pinned_orbs_do_not_demote_in_lifecycle_sweep() {
-    let dir = TempDir::new().unwrap();
-    let mut cfg = test_config(&dir);
+/// Shared setup for lifecycle-sweep tests: a Venturi with `t_warm_secs`/
+/// `t_cold_secs` small enough that a manually-backdated `last_accessed`
+/// crosses both cutoffs immediately, plus a direct connection to inspect
+/// catalog rows the sweep touches.
+fn open_tiny_lifecycle_venturi(dir: &TempDir) -> (Venturi, rusqlite::Connection) {
+    let mut cfg = test_config(dir);
     cfg.lifecycle = Some(LifecycleConfig {
         enabled: true,
         t_warm_secs: 1,
@@ -117,7 +119,57 @@ fn pinned_orbs_do_not_demote_in_lifecycle_sweep() {
         sweep_interval: 60,
     });
     let librarian_db = cfg.librarian_db.clone();
-    let mut v = Venturi::open(cfg).unwrap();
+    let v = Venturi::open(cfg).unwrap();
+    let conn = rusqlite::Connection::open(&librarian_db).unwrap();
+    (v, conn)
+}
+
+fn age_orbs(conn: &rusqlite::Connection, parent_ids: &[&str]) {
+    for parent_id in parent_ids {
+        conn.execute(
+            "UPDATE orbs
+             SET last_accessed = '0Z', last_accessed_at = '0Z', access_count = 0
+             WHERE parent_id = ?1",
+            rusqlite::params![parent_id],
+        )
+        .unwrap();
+    }
+}
+
+fn tier_of(conn: &rusqlite::Connection, parent_id: &str) -> String {
+    conn.query_row(
+        "SELECT tier FROM orbs WHERE parent_id = ?1",
+        rusqlite::params![parent_id],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+fn embedding_queue_count(conn: &rusqlite::Connection, orb_id: &str) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM embedding_queue WHERE orb_id = ?1",
+        rusqlite::params![orb_id],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+fn touch_last_accessed_now(conn: &rusqlite::Connection, parent_id: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    conn.execute(
+        "UPDATE orbs SET last_accessed = ?1, last_accessed_at = ?1 WHERE parent_id = ?2",
+        rusqlite::params![format!("{now}Z"), parent_id],
+    )
+    .unwrap();
+}
+
+#[test]
+fn pinned_orbs_do_not_demote_in_lifecycle_sweep() {
+    let dir = TempDir::new().unwrap();
+    let (mut v, conn) = open_tiny_lifecycle_venturi(&dir);
 
     let mut pinned_req = test_request("pinned lifecycle memory", vec![b"pinned".to_vec()]);
     pinned_req.pinned = Some(true);
@@ -130,35 +182,73 @@ fn pinned_orbs_do_not_demote_in_lifecycle_sweep() {
         ))
         .unwrap();
 
-    let conn = rusqlite::Connection::open(&librarian_db).unwrap();
-    conn.execute(
-        "UPDATE orbs
-         SET last_accessed = '0Z', last_accessed_at = '0Z', access_count = 0
-         WHERE parent_id IN (?1, ?2)",
-        rusqlite::params![pinned.parent_id, normal.parent_id],
-    )
-    .unwrap();
+    age_orbs(&conn, &[&pinned.parent_id, &normal.parent_id]);
 
     let report = v.lifecycle_sweep().unwrap();
     assert_eq!(report.sweep, "lifecycle");
 
-    let pinned_tier: String = conn
-        .query_row(
-            "SELECT tier FROM orbs WHERE parent_id = ?1",
-            rusqlite::params![pinned.parent_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let normal_tier: String = conn
-        .query_row(
-            "SELECT tier FROM orbs WHERE parent_id = ?1",
-            rusqlite::params![normal.parent_id],
-            |row| row.get(0),
-        )
-        .unwrap();
+    assert_eq!(tier_of(&conn, &pinned.parent_id), "hot");
+    assert_eq!(tier_of(&conn, &normal.parent_id), "cold");
+}
 
-    assert_eq!(pinned_tier, "hot");
-    assert_eq!(normal_tier, "cold");
+/// B15 (VENTURI_ROADMAP.md) documents cold demotion as "embedding dropped
+/// from working memory ... reloaded on demand" — a reversible cache
+/// eviction, not permanent data loss. Nothing else in the pipeline ever
+/// recomputes a dropped embedding, so if promotion back to hot doesn't
+/// re-queue it, the orb is silently and permanently dropped from semantic
+/// search (`load_summary_embeddings` requires `embedding IS NOT NULL`)
+/// despite sitting in the hot tier.
+#[test]
+fn cold_demoted_orb_is_requeued_for_reembedding_on_promotion() {
+    let dir = TempDir::new().unwrap();
+    let (mut v, conn) = open_tiny_lifecycle_venturi(&dir);
+
+    let result = v
+        .ingest(test_request("reembed me later", vec![b"content".to_vec()]))
+        .unwrap();
+    let orb_id = result.orb_ids[0].clone();
+
+    // Simulate an orb that was already embedded once, whose original
+    // ingest-time embedding_queue entry has already been consumed.
+    conn.execute(
+        "UPDATE orbs SET embedding = X'00' WHERE parent_id = ?1",
+        rusqlite::params![result.parent_id],
+    )
+    .unwrap();
+    conn.execute(
+        "DELETE FROM embedding_queue WHERE orb_id = ?1",
+        rusqlite::params![orb_id],
+    )
+    .unwrap();
+    age_orbs(&conn, &[&result.parent_id]);
+
+    // First sweep: idle beyond t_cold -> demoted to cold, embedding dropped.
+    v.lifecycle_sweep().unwrap();
+    let embedding: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT embedding FROM orbs WHERE parent_id = ?1",
+            rusqlite::params![result.parent_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tier_of(&conn, &result.parent_id), "cold");
+    assert!(embedding.is_none());
+    assert_eq!(
+        embedding_queue_count(&conn, &orb_id),
+        0,
+        "not re-queued while still cold"
+    );
+
+    // Access it again (recency now qualifies for promotion) and sweep.
+    touch_last_accessed_now(&conn, &result.parent_id);
+    v.lifecycle_sweep().unwrap();
+
+    assert_eq!(tier_of(&conn, &result.parent_id), "hot");
+    assert_eq!(
+        embedding_queue_count(&conn, &orb_id),
+        1,
+        "cold-demoted orb must be re-queued for embedding after promotion back to hot"
+    );
 }
 
 /// A recency-stale orb with enough positive EXIT-verdict evidence is exempted from cold
@@ -167,16 +257,7 @@ fn pinned_orbs_do_not_demote_in_lifecycle_sweep() {
 #[test]
 fn verdict_proven_useful_orb_is_exempt_from_cold_demotion() {
     let dir = TempDir::new().unwrap();
-    let mut cfg = test_config(&dir);
-    cfg.lifecycle = Some(LifecycleConfig {
-        enabled: true,
-        t_warm_secs: 1,
-        t_cold_secs: 2,
-        max_hot_orbs: 500,
-        sweep_interval: 60,
-    });
-    let librarian_db = cfg.librarian_db.clone();
-    let mut v = Venturi::open(cfg).unwrap();
+    let (mut v, conn) = open_tiny_lifecycle_venturi(&dir);
 
     let proven = v
         .ingest(test_request(
@@ -196,35 +277,13 @@ fn verdict_proven_useful_orb_is_exempt_from_cold_demotion() {
             .unwrap();
     }
 
-    let conn = rusqlite::Connection::open(&librarian_db).unwrap();
-    conn.execute(
-        "UPDATE orbs
-         SET last_accessed = '0Z', last_accessed_at = '0Z', access_count = 0
-         WHERE parent_id IN (?1, ?2)",
-        rusqlite::params![proven.parent_id, unproven.parent_id],
-    )
-    .unwrap();
+    age_orbs(&conn, &[&proven.parent_id, &unproven.parent_id]);
 
     let report = v.lifecycle_sweep().unwrap();
     assert_eq!(report.sweep, "lifecycle");
 
-    let proven_tier: String = conn
-        .query_row(
-            "SELECT tier FROM orbs WHERE parent_id = ?1",
-            rusqlite::params![proven.parent_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let unproven_tier: String = conn
-        .query_row(
-            "SELECT tier FROM orbs WHERE parent_id = ?1",
-            rusqlite::params![unproven.parent_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-
-    assert_ne!(proven_tier, "cold");
-    assert_eq!(unproven_tier, "cold");
+    assert_ne!(tier_of(&conn, &proven.parent_id), "cold");
+    assert_eq!(tier_of(&conn, &unproven.parent_id), "cold");
 }
 
 #[test]
@@ -689,6 +748,62 @@ fn chunk_size_limit_enforced() {
     let req = test_request("oversized chunk", vec![b"this is 17 bytes!".to_vec()]);
     let result = v.ingest(req);
     assert!(result.is_err(), "oversized chunk must be rejected");
+}
+
+/// `max_rehydration_bytes` is documented as a hard cap ("security
+/// requirements, not optional tuning"), enforced elsewhere by dropping
+/// whichever chunk first crosses it rather than letting it through. Document
+/// assembly (`document_by_parent_id`, chain reassembly) must enforce the same
+/// hard cap, not let one extra chunk slip past it.
+#[test]
+fn document_assembly_never_exceeds_max_rehydration_bytes() {
+    use venturi::StorageLimits;
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().to_str().unwrap();
+
+    let mut v = Venturi::open(VenturiConfig {
+        shelf_root: format!("{}/shelf", root),
+        journal_db: format!("{}/journal.db", root),
+        keystore_db: format!("{}/keystore.db", root),
+        librarian_db: format!("{}/librarian.db", root),
+        scribe_db: format!("{}/scribe.db", root),
+        graph_db: format!("{}/graph.db", root),
+        ollama_url: "http://localhost:11434".to_string(),
+        embedding_model: None,
+        embedding_dim: None,
+        lifecycle: None,
+        limits: StorageLimits {
+            max_chunk_bytes: 64,
+            max_chain_length: 10,
+            max_orbs_per_query: 100,
+            max_rehydration_bytes: 10,
+        },
+    })
+    .expect("open failed");
+
+    // Two 8-byte chunks: the first fits under the 10-byte cap, the second
+    // would push the running total to 16 bytes — it must be dropped, not
+    // appended, so the assembled document never exceeds the cap.
+    let req = test_request(
+        "two chunks over cap",
+        vec![b"12345678".to_vec(), b"abcdefgh".to_vec()],
+    );
+    let result = v.ingest(req).expect("ingest failed");
+
+    let (document, warnings) = v
+        .document_by_parent_id(&result.parent_id, None)
+        .expect("document retrieval failed");
+
+    assert!(
+        document.len() <= 10,
+        "document assembly exceeded max_rehydration_bytes: {} bytes",
+        document.len()
+    );
+    assert!(
+        warnings.iter().any(|w| w.contains("max_rehydration_bytes")),
+        "expected a max_rehydration_bytes warning, got: {:?}",
+        warnings
+    );
 }
 
 /// Metadata mode returns catalog rows without decrypting any content.

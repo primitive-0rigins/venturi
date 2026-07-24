@@ -31,9 +31,9 @@
 - Existing method: pure recency (LRU-style) tiering. No use of verdict
   feedback anywhere in tiering.
 - Simplest alternative: leave `usefulness_score` unused and either remove it
-  entirely, or correct its stale doc trail (`exit_events_since` comment, and the two
-  design docs `VENTURI_COMPONENTS.md`/`VENTURI_BUILD.md` that describe a
-  verdict-driven tier sweep that was never built).
+  entirely, or correct its stale doc trail (`exit_events_since` comment, and
+  the two design docs `VENTURI_COMPONENTS.md`/`VENTURI_BUILD.md` that
+  describe a verdict-driven tier sweep that was never built).
 - Current measured performance: N/A — recency-only tiering has no
   usefulness-awareness to measure against; the gap is that content proven
   useful by direct feedback but accessed rarely is demoted to cold

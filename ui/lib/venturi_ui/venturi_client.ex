@@ -33,12 +33,12 @@ defmodule VenturiUi.VenturiClient do
 
   @doc "GET /audit/:retrieval_audit_id"
   def audit(retrieval_audit_id) do
-    req() |> Req.get(url: "/audit/#{URI.encode(retrieval_audit_id)}") |> respond()
+    req() |> Req.get(url: "/audit/#{encode_segment(retrieval_audit_id)}") |> respond()
   end
 
   @doc "GET /chain/references/:parent_id"
   def chain_references(parent_id) do
-    req() |> Req.get(url: "/chain/references/#{URI.encode(parent_id)}") |> respond()
+    req() |> Req.get(url: "/chain/references/#{encode_segment(parent_id)}") |> respond()
   end
 
   @doc "POST /chain/link"
@@ -61,8 +61,12 @@ defmodule VenturiUi.VenturiClient do
 
   @doc "DELETE /hold/:parent_id"
   def release_hold(parent_id) do
-    req() |> Req.delete(url: "/hold/#{URI.encode(parent_id)}") |> respond()
+    req() |> Req.delete(url: "/hold/#{encode_segment(parent_id)}") |> respond()
   end
+
+  # `URI.encode/1`'s default predicate leaves reserved characters like `/`, `?`,
+  # and `#` untouched, so a ref containing one would corrupt the request path.
+  defp encode_segment(id), do: URI.encode(id, &URI.char_unreserved?/1)
 
   defp respond({:ok, %Req.Response{status: status, body: body}}) when status in 200..299 do
     {:ok, body}

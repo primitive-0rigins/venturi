@@ -48,6 +48,13 @@ pub struct LifecycleConfig {
 
 impl Default for LifecycleConfig {
     fn default() -> Self {
+        // Per VENTURI_ROADMAP.md (B15 — Context Lifecycle Manager): a fast,
+        // in-memory RAM-eviction cache scoped per actor, deliberately on a
+        // much shorter cycle than the long-term retention tiering in
+        // `pipeline/sweep.rs` (Hot <= 7 days, Warm 7-30 days, Cold 30+ days)
+        // — the two serve different purposes despite sharing `orbs.tier`.
+        // See `promote_active`'s embedding re-queue for why cold demotion
+        // here is safe to run this aggressively.
         Self {
             enabled: true,
             t_warm_secs: 5 * 60,
@@ -839,7 +846,8 @@ impl Librarian {
     }
 
     fn promote_active(&self, warm_cutoff: &str) -> Result<usize, TunnelError> {
-        self.conn
+        let promoted = self
+            .conn
             .execute(
                 "UPDATE orbs
                  SET tier = 'hot'
@@ -848,7 +856,36 @@ impl Librarian {
                    AND tier != 'hot'",
                 params![warm_cutoff],
             )
-            .map_err(|e| TunnelError::DatabaseError(e.to_string()))
+            .map_err(|e| TunnelError::DatabaseError(e.to_string()))?;
+
+        if promoted > 0 {
+            self.requeue_embeddings_for_hot_orbs()?;
+        }
+        Ok(promoted)
+    }
+
+    /// `demote_cold` drops `embedding` to free memory — B15's documented
+    /// design is that the orb "stays on disk, reloaded on demand." Nothing
+    /// else ever recomputes a dropped embedding, so without this, promotion
+    /// back to hot is silent and the orb never re-enters semantic search
+    /// (`load_summary_embeddings` requires `embedding IS NOT NULL`),
+    /// permanently losing recall for content that was simply idle for a
+    /// while. Re-queues through the same async `embedding_queue` used at
+    /// ingest, picked up by the existing embedding sweep, rather than
+    /// embedding synchronously inside this sweep.
+    fn requeue_embeddings_for_hot_orbs(&self) -> Result<(), TunnelError> {
+        let now = now_iso();
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO embedding_queue (orb_id, summary, queued_at)
+                 SELECT o.orb_id, f.body, ?1
+                 FROM orbs o
+                 JOIN fts_orbs f ON f.orb_id = o.orb_id AND f.source = 'summary'
+                 WHERE o.tier = 'hot' AND o.embedding IS NULL AND o.expired_at IS NULL",
+                params![now],
+            )
+            .map_err(|e| TunnelError::DatabaseError(e.to_string()))?;
+        Ok(())
     }
 
     fn cap_hot_tier(&self, max_hot_orbs: usize) -> Result<usize, TunnelError> {
@@ -918,7 +955,7 @@ impl Librarian {
             .conn
             .prepare(
                 "SELECT DISTINCT parent_id FROM orbs
-                 WHERE last_accessed < ?1 AND expired_at IS NULL",
+                 WHERE last_accessed < ?1 AND expired_at IS NULL AND pinned = 0",
             )
             .map_err(|e| TunnelError::DatabaseError(e.to_string()))?;
 
@@ -970,7 +1007,7 @@ impl Librarian {
                 self.conn
                     .execute(
                         "DELETE FROM embeddings_vec WHERE id = ?1 OR id GLOB ?2",
-                        params![summary_vector_id(orb_id), format!("f:{}:*", orb_id)],
+                        params![summary_vector_id(orb_id), format!("f:*:{}:*", orb_id)],
                     )
                     .ok();
             }
@@ -2194,5 +2231,46 @@ mod tests {
             .expect("query nearest vector");
 
         assert_eq!(nearest, summary_vector_id("a"));
+    }
+
+    #[test]
+    fn eject_chain_fact_vector_cleanup_glob_matches_source_prefixed_ids() {
+        if env::var("VENTURI_SQLITE_VEC_EXTENSION").is_err() {
+            return;
+        }
+
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite");
+        init_search_schema(&conn).expect("init search schema");
+        assert!(load_sqlite_vec_if_configured(&conn));
+        assert!(ensure_sqlite_vec_table(&conn, 4).expect("create vec table"));
+
+        // fact_vector_id ids are shaped "f:<source>:<orb_id>:<fact_idx>" — the
+        // source (fact/hype) comes before the orb_id, not after.
+        let ejected_fact = fact_vector_id("orb-1", "fact", 0);
+        let ejected_hype = fact_vector_id("orb-1", "hype", 3);
+        let kept_fact = fact_vector_id("orb-2", "fact", 0);
+        for id in [&ejected_fact, &ejected_hype, &kept_fact] {
+            conn.execute(
+                "INSERT INTO embeddings_vec (id, embedding) VALUES (?1, ?2)",
+                params![id, floats_to_bytes(&[1.0, 0.0, 0.0, 0.0])],
+            )
+            .expect("insert fact vector");
+        }
+
+        conn.execute(
+            "DELETE FROM embeddings_vec WHERE id = ?1 OR id GLOB ?2",
+            params![summary_vector_id("orb-1"), format!("f:*:{}:*", "orb-1")],
+        )
+        .expect("delete orb-1 vectors");
+
+        let remaining: Vec<String> = conn
+            .prepare("SELECT id FROM embeddings_vec ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+
+        assert_eq!(remaining, vec![kept_fact]);
     }
 }

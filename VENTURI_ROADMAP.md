@@ -417,15 +417,19 @@ new API endpoint `POST /hold` and `DELETE /hold/:parent_id`
 ## Phase: COMPLETED BACKLOG ITEMS
 
 ### B1 — Per-Agent Rate Limits and Backpressure
-**Status:** Implemented phase 1 — per-agent rolling-window limits protect ingest
-and retrieval endpoints. Full channel backpressure remains part of R2.
+**Status:** Implemented phase 1 — rolling-window limits protect ingest and
+retrieval endpoints. Full channel backpressure remains part of R2.
 
 **Effort:** Medium | **Value:** Medium
 **Source:** Design notes — Backpressure section
 
-Track ingest and retrieval counts per `agent_id` within a rolling window.
-Return `retry_after_ms` when an agent exceeds its quota. Prevents a runaway
-agent from starving others through the single Mutex.
+Track ingest and retrieval counts within a rolling window, keyed by the
+**authenticated API key** (not the caller-supplied `agent_id` body field —
+an original version of this keyed by `agent_id`, which any caller could
+rotate per-request to open a fresh bucket and bypass the limiter entirely;
+fixed by threading the key that `require_api_key` already validated through
+request extensions). Return `retry_after_ms` when a key exceeds its quota.
+Prevents a runaway caller from starving others through the single Mutex.
 
 ---
 

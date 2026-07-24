@@ -1220,15 +1220,21 @@ impl Venturi {
         let mut token_budget = TokenBudget::new(max_tokens);
 
         for row in rows {
-            if self.document_limit_reached(total_bytes, &mut warnings) {
-                break;
-            }
             match self.load_and_rehydrate_with_retry(&row.orb_id) {
                 Ok(content) => {
                     if token_budget.exhausted_by(&content, &mut warnings) {
                         break;
                     }
                     total_bytes += content.len();
+                    // Checked *after* adding this row's bytes, and this row
+                    // is not appended when the cap is hit — otherwise the
+                    // row that first crosses the limit always slips through
+                    // before the next iteration notices, letting the
+                    // "hard" max_rehydration_bytes cap be exceeded by up to
+                    // one row's worth of bytes.
+                    if self.document_limit_reached(total_bytes, &mut warnings) {
+                        break;
+                    }
                     document.extend_from_slice(&content);
                 }
                 Err(w) => {

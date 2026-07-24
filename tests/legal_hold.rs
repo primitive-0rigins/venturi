@@ -111,3 +111,32 @@ fn legal_hold_blocks_expiry_until_released() {
     assert_eq!(expired_report.chains_affected, 1);
     assert!(!shelf.exists(&orb_id));
 }
+
+#[test]
+fn pinned_chain_is_not_deleted_by_expiry_sweep() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().to_str().unwrap().to_string();
+    let mut v = Venturi::open(config(&dir)).unwrap();
+    let mut req = request(b"pinned");
+    req.pinned = Some(true);
+    let result = v.ingest(req).unwrap();
+    age_chain(&root, &result.parent_id);
+
+    let report = v.sweep_expiry().unwrap();
+    assert_eq!(report.chains_affected, 0);
+    assert_eq!(report.orbs_ejected, 0);
+
+    let shelf = OrbShelf::new(format!("{}/shelf", root));
+    let orb_id = OrbId::from_hex(&result.orb_ids[0]).unwrap();
+    assert!(shelf.exists(&orb_id));
+
+    let librarian = Connection::open(format!("{}/librarian.db", root)).unwrap();
+    let expired_at: Option<String> = librarian
+        .query_row(
+            "SELECT expired_at FROM orbs WHERE parent_id = ?1",
+            [&result.parent_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(expired_at.is_none());
+}

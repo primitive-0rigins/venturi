@@ -463,15 +463,15 @@ Scribe: record retrieval → prompt agent 1/0 on parent_id → propagate to all 
 
 ## Authorization Boundary
 
-Venturi provides **audit, not authorization.**
+Venturi provides **audit and coarse-grained authorization**, not per-orb access control.
 
 - **Audit** — Scribe records every ingestion, retrieval, and exit verdict with `agent_id` and full timestamps. The full history of who put what in and who retrieved what is always available.
-- **Authorization** — who is allowed to query what — is not Venturi's responsibility. Venturi trusts the caller.
+- **Authorization** — every request requires a Bearer API key, scoped `read`, `write`, or `admin` (see `src/auth.rs`). A key's scope gates which *endpoints* it may call — `/ingest` and `/verdict` need write, `/retrieve/*` and `/audit/*` need read, everything else (`/hold`, `/chain/link`, unlisted paths) needs admin, fail-closed by default. It does not gate access to individual orbs — any key with sufficient scope can query any orb; there is no per-agent or per-classification ACL.
 
 **When Venturi runs behind another service or is called directly:**
-Any caller that can reach the Venturi API can query any orb. Authorization is the responsibility of whatever sits in front of Venturi — a proxy, an orchestrator, a network boundary. Venturi does not discriminate between callers.
+Any caller holding a validly-scoped key can query any orb within that scope. Finer-grained access control — which agent may see which orb — is the responsibility of whatever sits in front of Venturi: a proxy, an orchestrator, a network boundary.
 
-This is a deliberate separation of concerns. Venturi is a store. Access control is the orchestration layer's job.
+This is a deliberate separation of concerns. Venturi enforces the coarse boundary (can this caller reach this class of endpoint at all) and audits everything; per-orb access control is the orchestration layer's job.
 
 ---
 

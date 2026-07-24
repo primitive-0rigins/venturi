@@ -1,6 +1,6 @@
 use axum::{
     body::{Body, Bytes},
-    extract::{Path, Query, Request, State},
+    extract::{Extension, Path, Query, Request, State},
     http::{header, StatusCode},
     middleware::{self, Next},
     response::{Json, Response},
@@ -84,19 +84,46 @@ impl ServerState {
     /// Bypasses env-var key loading so tests can inject keys directly instead
     /// of mutating process-wide state.
     #[cfg(test)]
-    fn with_api_keys(venturi: SharedVenturi, api_keys: Vec<ApiKey>) -> Self {
+    fn with_api_keys_and_rate_limits(
+        venturi: SharedVenturi,
+        api_keys: Vec<ApiKey>,
+        rate_limits: RateLimitConfig,
+    ) -> Self {
         Self {
             venturi,
             limiter: Arc::new(Mutex::new(RateLimiter::new())),
-            rate_limits: RateLimitConfig::default(),
+            rate_limits,
             api_keys: Arc::new(api_keys),
         }
     }
 }
 
+/// The API key that authenticated this request, threaded through request
+/// extensions so handlers can rate-limit by *authenticated* identity
+/// instead of an unauthenticated, caller-supplied field like `agent_id`
+/// (which a caller could rotate per-request to bypass the limiter entirely).
+#[derive(Clone)]
+struct AuthenticatedKey(String);
+
+/// Constant-time string comparison for Bearer token checks, so a caller
+/// probing keys can't learn how many leading bytes matched from response
+/// latency. A length mismatch short-circuits (leaking only length, not
+/// content — the standard trade-off for this kind of comparison).
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 async fn require_api_key(
     State(state): State<ServerState>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
     let token = request
@@ -104,15 +131,19 @@ async fn require_api_key(
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    let allowed = token.is_some_and(|token| {
+    let required = required_scope(request.uri().path());
+    let matched = token.and_then(|token| {
         state
             .api_keys
             .iter()
-            .any(|key| key.value == token && key.scope.allows(required_scope(request.uri().path())))
+            .find(|key| constant_time_eq(&key.value, token) && key.scope.allows(required))
     });
-    if !allowed {
+    let Some(matched) = matched else {
         return Err(StatusCode::UNAUTHORIZED);
-    }
+    };
+    request
+        .extensions_mut()
+        .insert(AuthenticatedKey(matched.value.clone()));
     Ok(next.run(request).await)
 }
 
@@ -141,7 +172,7 @@ enum RateLimitedOp {
 
 #[derive(Debug, Eq, Hash, PartialEq)]
 struct RateLimitKey {
-    agent_id: String,
+    identity: String,
     op: RateLimitedOp,
 }
 
@@ -163,7 +194,7 @@ impl RateLimiter {
 
     fn check(
         &mut self,
-        agent_id: &str,
+        identity: &str,
         op: RateLimitedOp,
         now: Instant,
         config: RateLimitConfig,
@@ -179,7 +210,7 @@ impl RateLimiter {
         }
 
         let key = RateLimitKey {
-            agent_id: agent_id.to_string(),
+            identity: identity.to_string(),
             op,
         };
         let events = self.events.entry(key).or_default();
@@ -572,9 +603,10 @@ async fn health(
 
 async fn ingest(
     State(state): State<ServerState>,
+    Extension(auth): Extension<AuthenticatedKey>,
     Json(body): Json<IngestBody>,
 ) -> Result<Json<IngestResponse>, (StatusCode, String)> {
-    enforce_rate_limit(&state, &body.agent_id, RateLimitedOp::Ingest)?;
+    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Ingest)?;
 
     // Decode base64 chunks → raw bytes
     let chunks: Vec<Vec<u8>> = body
@@ -625,13 +657,10 @@ async fn ingest(
 
 async fn retrieve_context(
     State(state): State<ServerState>,
+    Extension(auth): Extension<AuthenticatedKey>,
     Json(body): Json<ContextBody>,
 ) -> Result<Json<ChunksResponse>, (StatusCode, String)> {
-    enforce_rate_limit(
-        &state,
-        body.agent_id.as_deref().unwrap_or("anonymous"),
-        RateLimitedOp::Retrieval,
-    )?;
+    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Retrieval)?;
 
     let result = state
         .venturi
@@ -660,13 +689,10 @@ async fn retrieve_context(
 
 async fn retrieve_document(
     State(state): State<ServerState>,
+    Extension(auth): Extension<AuthenticatedKey>,
     Json(body): Json<DocumentBody>,
 ) -> Result<Json<DocumentResponse>, (StatusCode, String)> {
-    enforce_rate_limit(
-        &state,
-        body.agent_id.as_deref().unwrap_or("anonymous"),
-        RateLimitedOp::Retrieval,
-    )?;
+    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Retrieval)?;
 
     let result = state
         .venturi
@@ -687,9 +713,10 @@ async fn retrieve_document(
 
 async fn retrieve_document_by_id(
     State(state): State<ServerState>,
+    Extension(auth): Extension<AuthenticatedKey>,
     Path(parent_id): Path<String>,
 ) -> Result<Json<DocumentResponse>, (StatusCode, String)> {
-    enforce_rate_limit(&state, "anonymous", RateLimitedOp::Retrieval)?;
+    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Retrieval)?;
 
     let result = state
         .venturi
@@ -817,9 +844,10 @@ async fn document_stream_next(
 /// before the whole thing is rehydrated. See roadmap item B2.
 async fn retrieve_document_stream(
     State(state): State<ServerState>,
+    Extension(auth): Extension<AuthenticatedKey>,
     Path(parent_id): Path<String>,
 ) -> Result<Response, (StatusCode, String)> {
-    enforce_rate_limit(&state, "anonymous", RateLimitedOp::Retrieval)?;
+    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Retrieval)?;
 
     let orb_ids = state
         .venturi
@@ -846,13 +874,10 @@ async fn retrieve_document_stream(
 
 async fn retrieve_graph(
     State(state): State<ServerState>,
+    Extension(auth): Extension<AuthenticatedKey>,
     Json(body): Json<GraphBody>,
 ) -> Result<Json<ChunksResponse>, (StatusCode, String)> {
-    enforce_rate_limit(
-        &state,
-        body.agent_id.as_deref().unwrap_or("anonymous"),
-        RateLimitedOp::Retrieval,
-    )?;
+    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Retrieval)?;
 
     let result = state
         .venturi
@@ -875,13 +900,10 @@ async fn retrieve_graph(
 
 async fn retrieve_consensus(
     State(state): State<ServerState>,
+    Extension(auth): Extension<AuthenticatedKey>,
     Json(body): Json<ConsensusBody>,
 ) -> Result<Json<ConsensusResponse>, (StatusCode, String)> {
-    enforce_rate_limit(
-        &state,
-        body.agent_id.as_deref().unwrap_or("anonymous"),
-        RateLimitedOp::Retrieval,
-    )?;
+    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Retrieval)?;
 
     let result = state
         .venturi
@@ -921,13 +943,10 @@ async fn retrieve_consensus(
 
 async fn retrieve_temporal(
     State(state): State<ServerState>,
+    Extension(auth): Extension<AuthenticatedKey>,
     Json(body): Json<TemporalBody>,
 ) -> Result<Json<ChunksResponse>, (StatusCode, String)> {
-    enforce_rate_limit(
-        &state,
-        body.agent_id.as_deref().unwrap_or("anonymous"),
-        RateLimitedOp::Retrieval,
-    )?;
+    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Retrieval)?;
 
     let result = state
         .venturi
@@ -956,13 +975,10 @@ async fn retrieve_temporal(
 
 async fn retrieve_structured(
     State(state): State<ServerState>,
+    Extension(auth): Extension<AuthenticatedKey>,
     Json(body): Json<StructuredBody>,
 ) -> Result<Json<ChunksResponse>, (StatusCode, String)> {
-    enforce_rate_limit(
-        &state,
-        body.agent_id.as_deref().unwrap_or("anonymous"),
-        RateLimitedOp::Retrieval,
-    )?;
+    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Retrieval)?;
 
     let filter = StructuredFilter {
         topic: body.topic,
@@ -996,13 +1012,10 @@ async fn retrieve_structured(
 
 async fn retrieve_metadata(
     State(state): State<ServerState>,
+    Extension(auth): Extension<AuthenticatedKey>,
     Json(body): Json<MetadataBody>,
 ) -> Result<Json<MetadataResponse>, (StatusCode, String)> {
-    enforce_rate_limit(
-        &state,
-        body.agent_id.as_deref().unwrap_or("anonymous"),
-        RateLimitedOp::Retrieval,
-    )?;
+    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Retrieval)?;
 
     let filter = StructuredFilter {
         topic: body.topic,
@@ -1049,9 +1062,10 @@ async fn verdict(
 
 async fn audit(
     State(state): State<ServerState>,
+    Extension(auth): Extension<AuthenticatedKey>,
     Path(retrieval_audit_id): Path<String>,
 ) -> Result<Json<AuditResponse>, (StatusCode, String)> {
-    enforce_rate_limit(&state, "anonymous", RateLimitedOp::Retrieval)?;
+    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Retrieval)?;
 
     let proof = state
         .venturi
@@ -1131,9 +1145,10 @@ async fn chain_references(
 
 async fn retrieve_foresights(
     State(state): State<ServerState>,
+    Extension(auth): Extension<AuthenticatedKey>,
     Query(query): Query<ForesightQuery>,
 ) -> Result<Json<ForesightsResponse>, (StatusCode, String)> {
-    enforce_rate_limit(&state, "anonymous", RateLimitedOp::Retrieval)?;
+    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Retrieval)?;
     let foresights = state
         .venturi
         .foresights(query.on)
@@ -1164,11 +1179,11 @@ fn worker_error(error: WorkerError) -> (StatusCode, String) {
 
 fn enforce_rate_limit(
     state: &ServerState,
-    agent_id: &str,
+    identity: &str,
     op: RateLimitedOp,
 ) -> Result<(), (StatusCode, String)> {
     let decision =
-        lock_mutex(&state.limiter).check(agent_id, op, Instant::now(), state.rate_limits);
+        lock_mutex(&state.limiter).check(identity, op, Instant::now(), state.rate_limits);
 
     match decision {
         Some(decision) => Err(overloaded_error(decision.retry_after_ms)),
@@ -1410,6 +1425,14 @@ mod tests {
         assert_eq!(parsed["retry_after_ms"], 2500);
     }
 
+    #[test]
+    fn constant_time_eq_matches_ordinary_string_equality() {
+        assert!(constant_time_eq("same-key", "same-key"));
+        assert!(!constant_time_eq("same-key", "different"));
+        assert!(!constant_time_eq("short", "much-longer-string"));
+        assert!(constant_time_eq("", ""));
+    }
+
     // ── auth middleware ────────────────────────────────────────────────────
 
     use axum::body::Body;
@@ -1419,6 +1442,13 @@ mod tests {
     use venturi::{StorageLimits, Venturi, VenturiConfig};
 
     fn test_router(api_keys: Vec<ApiKey>) -> (Router, tempfile::TempDir) {
+        test_router_with_rate_limits(api_keys, RateLimitConfig::default())
+    }
+
+    fn test_router_with_rate_limits(
+        api_keys: Vec<ApiKey>,
+        rate_limits: RateLimitConfig,
+    ) -> (Router, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_str().unwrap();
         let config = VenturiConfig {
@@ -1436,7 +1466,7 @@ mod tests {
         };
         let venturi = Venturi::open(config).unwrap();
         let sender = crate::worker::spawn_worker(venturi);
-        let state = ServerState::with_api_keys(sender, api_keys);
+        let state = ServerState::with_api_keys_and_rate_limits(sender, api_keys, rate_limits);
         (build_router_with_state(state), dir)
     }
 
@@ -1527,6 +1557,48 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_is_keyed_by_authenticated_key_not_caller_supplied_agent_id() {
+        let (router, _dir) = test_router_with_rate_limits(
+            vec![ApiKey {
+                value: "shared-key".to_string(),
+                scope: Scope::Admin,
+            }],
+            RateLimitConfig {
+                ingest_limit: 1,
+                retrieval_limit: 1,
+                window: Duration::from_secs(60),
+            },
+        );
+
+        let first = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/retrieve/context",
+                "shared-key",
+                serde_json::json!({"query": "hello", "agent_id": "agent-a"}),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(first.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Same authenticated key, different caller-supplied agent_id — must
+        // still be rate-limited. Before the fix, the unauthenticated
+        // `agent_id` field (caller-chosen) was the rate-limit key, so
+        // rotating it per request bypassed the limiter entirely.
+        let second = router
+            .oneshot(json_request(
+                "POST",
+                "/retrieve/context",
+                "shared-key",
+                serde_json::json!({"query": "hello", "agent_id": "agent-b"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     // ── streamed document retrieval (roadmap B2) ──────────────────────────
