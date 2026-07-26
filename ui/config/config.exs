@@ -14,7 +14,16 @@ config :venturi_ui, :venturi_api,
   base_url: "http://localhost:8080",
   api_key: nil
 
-config :venturi_ui, :operator_auth, enabled: false
+config :venturi_ui, :oidc,
+  issuer: nil,
+  client_id: nil,
+  client_secret: nil,
+  client_authentication_method: :none,
+  redirect_uri: nil,
+  group_claim: "groups",
+  operator_groups: ["venturi-operator"],
+  auditor_groups: ["venturi-auditor"],
+  session_ttl_seconds: 900
 
 # Configures the endpoint
 config :venturi_ui, VenturiUiWeb.Endpoint,

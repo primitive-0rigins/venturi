@@ -1,5 +1,7 @@
 import Config
 
+demo_mode = System.get_env("VENTURI_UI_DEMO") == "true"
+
 # For development, we disable any cache and enable
 # debugging and code reloading.
 #
@@ -7,9 +9,11 @@ import Config
 # watchers to your application. For example, we can use it
 # to bundle .js and .css sources.
 config :venturi_ui, VenturiUiWeb.Endpoint,
-  # Binding to loopback ipv4 address prevents access from other machines.
-  # Change to `ip: {0, 0, 0, 0}` to allow access from other machines.
-  http: [ip: {127, 0, 0, 1}, port: 4000],
+  # Demo mode bypasses OIDC, so development always remains loopback-only.
+  http: [
+    ip: {127, 0, 0, 1},
+    port: String.to_integer(System.get_env("PORT") || "4000")
+  ],
   check_origin: false,
   code_reloader: true,
   debug_errors: true,
@@ -69,3 +73,14 @@ config :phoenix_live_view,
   debug_heex_annotations: true,
   # Enable helpful, but potentially expensive runtime checks
   enable_expensive_runtime_checks: true
+
+# Local portfolio demos may bypass OIDC only in the development environment.
+# This is never loaded by production releases; do not set this variable for
+# anything other than a local demonstration.
+config :venturi_ui, :oidc_test_bypass, demo_mode
+config :venturi_ui, :demo_mode, demo_mode
+
+config :venturi_ui, :venturi_api,
+  base_url: System.get_env("VENTURI_API_URL") || "http://127.0.0.1:9271",
+  api_key: System.get_env("VENTURI_API_KEY"),
+  namespace: System.get_env("VENTURI_NAMESPACE") || "default"

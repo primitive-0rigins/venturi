@@ -17,9 +17,17 @@ jobs:
       - run: cargo fmt --check
       - run: cargo test --locked
       - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories licenses
+      - run: cargo install cargo-cyclonedx --version 0.5.7 --locked
+      - run: ./scripts/generate-sbom.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cyclonedx-sbom
+          path: venturi.cdx.json
 
   phoenix:
     runs-on: ubuntu-latest
@@ -35,3 +43,4 @@ jobs:
       - run: mix deps.get --only test
       - run: mix format --check-formatted
       - run: mix test
+      - run: MIX_ENV=prod mix assets.deploy

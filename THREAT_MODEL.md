@@ -7,15 +7,17 @@
 - Raw chain keys are stored separately from catalog metadata in the keystore.
 - The API binds to loopback by default and requires a Bearer key for memory
   operations. Keys have endpoint scopes: `read`, `write`, and `admin`.
-- The production dashboard binds to loopback and requires HTTP Basic
-  authentication; it expects a TLS-terminating reverse proxy.
+- The production dashboard binds to loopback and uses OIDC Authorization Code
+  + PKCE with operator and auditor roles; it expects a TLS-terminating reverse
+  proxy.
 - Stored orbs verify their format, parent binding, and content-derived ID on
   read. Corrupt content is surfaced as a warning or typed error.
 
 ## Explicitly out of scope
 
-- Per-tenant, per-agent, or per-classification authorization. A valid key with
-  sufficient endpoint scope can access any data reachable through that route.
+- Per-user record permissions or a multi-organization tenancy model. Namespace
+  grants isolate supported HIPAA-profile operations; unscoped retrieval modes
+  are disabled in that profile.
 - TLS termination, network segmentation, host hardening, secret distribution,
   and physical storage security.
 - Key rotation, key revocation, and re-encryption of existing chains.

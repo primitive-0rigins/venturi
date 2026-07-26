@@ -1,0 +1,19 @@
+[Unit]
+Description=Venturi encrypted memory API
+After=network-online.target
+
+[Service]
+User=venturi
+Group=venturi
+EnvironmentFile=/etc/venturi/venturi.env
+ExecStart=/usr/local/bin/venturi
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/venturi
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

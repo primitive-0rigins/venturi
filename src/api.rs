@@ -4,11 +4,12 @@ use crate::intelligence::gatekeeper::{
 use crate::intelligence::librarian::{
     ChainReference, ForesightRow, LifecycleConfig, MetaRow, OrbRow, StructuredFilter,
 };
-use crate::intelligence::scribe::RetrievalProof;
+use crate::intelligence::scribe::{AuditExport, RetrievalProof};
 use crate::pipeline::retrieval::RetrievalPipeline;
-use crate::pipeline::sweep::{SweepReport, Sweeper};
+use crate::pipeline::sweep::{RetentionPolicy, SweepReport, Sweeper};
 use crate::types::error::{NotFoundReason, TunnelError};
 use crate::types::orb::OrbId;
+use std::env;
 
 /// Hard resource limits enforced on every retrieval and ingestion call.
 ///
@@ -65,6 +66,7 @@ pub struct Venturi {
     gatekeeper: Gatekeeper,
     pipeline: RetrievalPipeline,
     lifecycle: LifecycleConfig,
+    retention: Option<RetentionPolicy>,
     limits: StorageLimits,
 }
 
@@ -163,6 +165,7 @@ impl Venturi {
             gatekeeper,
             pipeline: RetrievalPipeline::new(),
             lifecycle: cfg.lifecycle.unwrap_or_default(),
+            retention: configured_retention_policy(),
             limits: cfg.limits,
         })
     }
@@ -188,6 +191,14 @@ impl Venturi {
     ///   - each chunk must be ≤ max_chunk_bytes
     ///   - chain length (number of chunks) must be ≤ max_chain_length
     pub fn ingest(&mut self, req: IngestionRequest) -> Result<IngestionResult, TunnelError> {
+        self.ingest_in_namespace(req, "default")
+    }
+
+    pub fn ingest_in_namespace(
+        &mut self,
+        req: IngestionRequest,
+        namespace: &str,
+    ) -> Result<IngestionResult, TunnelError> {
         if req.chunks.len() > self.limits.max_chain_length {
             return Err(TunnelError::GatekeeperRejected {
                 reason: format!(
@@ -209,7 +220,26 @@ impl Venturi {
                 });
             }
         }
-        self.gatekeeper.ingest(req)
+        self.gatekeeper.ingest_in_namespace(req, namespace)
+    }
+
+    pub fn migrate_default_namespace(&self, namespace: &str) -> Result<u32, TunnelError> {
+        let changed = self
+            .gatekeeper
+            .librarian()
+            .migrate_default_namespace(namespace)?;
+        self.gatekeeper.scribe().record_administrative_action(
+            "local-operator",
+            "namespace_migration",
+            namespace,
+            "catalog",
+            "success",
+        )?;
+        Ok(changed)
+    }
+
+    pub fn chain_namespace(&self, parent_id: &str) -> Result<Option<String>, TunnelError> {
+        self.gatekeeper.librarian().chain_namespace(parent_id)
     }
 
     // ── Retrieval: Context mode ───────────────────────────────────────────────
@@ -257,15 +287,41 @@ impl Venturi {
         check_stability: bool,
         agent_id: Option<&str>,
     ) -> Result<RetrievalWithProof<Vec<Vec<u8>>>, TunnelError> {
+        self.context_with_options_and_proof_in_namespace(
+            query,
+            top_k,
+            max_tokens,
+            check_stability,
+            agent_id,
+            None,
+        )
+    }
+
+    pub fn context_with_options_and_proof_in_namespace(
+        &self,
+        query: &str,
+        top_k: usize,
+        max_tokens: Option<u32>,
+        check_stability: bool,
+        agent_id: Option<&str>,
+        namespace: Option<&str>,
+    ) -> Result<RetrievalWithProof<Vec<Vec<u8>>>, TunnelError> {
         let effective_k = top_k.min(self.limits.max_orbs_per_query);
-        let orb_ids = self
-            .gatekeeper
-            .librarian()
-            .similarity_search(query, effective_k)
-            .map_err(|_| TunnelError::MemoryNotFound {
-                query: query.to_string(),
-                reason: NotFoundReason::EmbeddingUnavailable,
-            })?;
+        let orb_ids = match namespace {
+            Some(namespace) => self.gatekeeper.librarian().similarity_search_in_namespace(
+                query,
+                effective_k,
+                namespace,
+            ),
+            None => self
+                .gatekeeper
+                .librarian()
+                .similarity_search(query, effective_k),
+        }
+        .map_err(|_| TunnelError::MemoryNotFound {
+            query: query.to_string(),
+            reason: NotFoundReason::EmbeddingUnavailable,
+        })?;
         if orb_ids.is_empty() {
             return Err(TunnelError::MemoryNotFound {
                 query: query.to_string(),
@@ -743,8 +799,24 @@ impl Venturi {
         max_tokens: Option<u32>,
         agent_id: Option<&str>,
     ) -> Result<RetrievalWithProof<Vec<Vec<u8>>>, TunnelError> {
+        self.structured_with_budget_and_proof_in_namespace(filter, max_tokens, agent_id, None)
+    }
+
+    pub fn structured_with_budget_and_proof_in_namespace(
+        &self,
+        filter: StructuredFilter,
+        max_tokens: Option<u32>,
+        agent_id: Option<&str>,
+        namespace: Option<&str>,
+    ) -> Result<RetrievalWithProof<Vec<Vec<u8>>>, TunnelError> {
         let filters_applied = filter_json(&filter);
-        let rows = self.gatekeeper.librarian().fetch_structured(filter)?;
+        let rows = match namespace {
+            Some(namespace) => self
+                .gatekeeper
+                .librarian()
+                .fetch_structured_in_namespace(filter, namespace)?,
+            None => self.gatekeeper.librarian().fetch_structured(filter)?,
+        };
         let rows = &rows[..rows.len().min(self.limits.max_orbs_per_query)];
         let orb_ids: Vec<String> = rows.iter().map(|r| r.orb_id.clone()).collect();
         let (results, warnings, token_budget_applied) = self.rehydrate_rows(rows, max_tokens);
@@ -793,8 +865,23 @@ impl Venturi {
         filter: StructuredFilter,
         agent_id: Option<&str>,
     ) -> Result<RetrievalWithProof<Vec<MetaRow>>, TunnelError> {
+        self.metadata_with_proof_in_namespace(filter, agent_id, None)
+    }
+
+    pub fn metadata_with_proof_in_namespace(
+        &self,
+        filter: StructuredFilter,
+        agent_id: Option<&str>,
+        namespace: Option<&str>,
+    ) -> Result<RetrievalWithProof<Vec<MetaRow>>, TunnelError> {
         let filters_applied = filter_json(&filter);
-        let rows = self.gatekeeper.librarian().fetch_metadata(filter)?;
+        let rows = match namespace {
+            Some(namespace) => self
+                .gatekeeper
+                .librarian()
+                .fetch_metadata_in_namespace(filter, namespace)?,
+            None => self.gatekeeper.librarian().fetch_metadata(filter)?,
+        };
         let rows = &rows[..rows.len().min(self.limits.max_orbs_per_query)];
 
         // Audit that metadata was accessed — no orb_ids since nothing was decrypted
@@ -845,6 +932,23 @@ impl Venturi {
         retrieval_audit_id: &str,
     ) -> Result<Option<RetrievalProof>, TunnelError> {
         self.gatekeeper.scribe().retrieval_proof(retrieval_audit_id)
+    }
+
+    pub fn record_administrative_action(
+        &self,
+        principal: &str,
+        action: &str,
+        namespace: &str,
+        target_id: &str,
+        outcome: &str,
+    ) -> Result<(), TunnelError> {
+        self.gatekeeper
+            .scribe()
+            .record_administrative_action(principal, action, namespace, target_id, outcome)
+    }
+
+    pub fn export_audit_jsonl(&self, private_key: &[u8; 32]) -> Result<AuditExport, TunnelError> {
+        self.gatekeeper.scribe().export_jsonl(private_key)
     }
 
     pub fn set_legal_hold(&self, parent_id: &str, reason: &str) -> Result<(), TunnelError> {
@@ -912,7 +1016,7 @@ impl Venturi {
         .sweep_tiers()
     }
 
-    /// Run the 90-day expiry sweep. Call once daily.
+    /// Run the configured retention expiry sweep. Call once daily.
     pub fn sweep_expiry(&self) -> Result<SweepReport, TunnelError> {
         Sweeper::new(
             self.gatekeeper.librarian(),
@@ -921,7 +1025,7 @@ impl Venturi {
             self.gatekeeper.graph(),
             self.gatekeeper.scribe(),
         )
-        .sweep_expiry()
+        .sweep_expiry(self.retention.as_ref())
     }
 
     /// Run the hot/warm/cold lifecycle manager sweep.
@@ -1341,6 +1445,18 @@ impl Venturi {
             }
         }
         Ok(parent_ids)
+    }
+}
+
+fn configured_retention_policy() -> Option<RetentionPolicy> {
+    match env::var("VENTURI_RETENTION_DAYS").ok().as_deref() {
+        Some("indefinite") => Some(RetentionPolicy::Indefinite),
+        Some(value) => value
+            .parse::<u64>()
+            .ok()
+            .filter(|days| *days > 0)
+            .map(RetentionPolicy::Days),
+        None => None,
     }
 }
 

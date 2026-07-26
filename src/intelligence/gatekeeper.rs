@@ -181,6 +181,18 @@ impl Gatekeeper {
     /// Thread-safety: Gatekeeper takes &mut self. Use one Gatekeeper per thread
     /// or wrap in a Mutex for concurrent ingestion.
     pub fn ingest(&mut self, req: IngestionRequest) -> Result<IngestionResult, TunnelError> {
+        self.ingest_in_namespace(req, "default")
+    }
+
+    /// Store a chain in an explicit in-instance namespace.
+    pub fn ingest_in_namespace(
+        &mut self,
+        req: IngestionRequest,
+        namespace: &str,
+    ) -> Result<IngestionResult, TunnelError> {
+        if namespace.trim().is_empty() {
+            return Self::reject("namespace is required");
+        }
         Self::validate_request(&req)?;
 
         let parent_id = Uuid::new_v4().to_string();
@@ -195,7 +207,7 @@ impl Gatekeeper {
         let seal_result = self.seal_chain(&parent_id, chain_length, &req);
 
         match seal_result {
-            Ok(sealed) => self.complete_ingestion(parent_id, chain_length, &req, sealed),
+            Ok(sealed) => self.complete_ingestion(parent_id, chain_length, &req, sealed, namespace),
             Err(e) => self.fail_ingestion(&parent_id, chain_length, &req, e),
         }
     }
@@ -284,6 +296,7 @@ impl Gatekeeper {
                 &entry.parent_id,
                 entry.expected_n,
                 &req,
+                "default",
             )
             .is_err()
         {
@@ -313,6 +326,7 @@ impl Gatekeeper {
         chain_length: u32,
         req: &IngestionRequest,
         sealed: SealedChain,
+        namespace: &str,
     ) -> Result<IngestionResult, TunnelError> {
         if let Err(e) = self.journal.commit_ingestion(&parent_id) {
             let _ = self.rollback(&parent_id, &sealed.orb_ids, &e.to_string());
@@ -327,6 +341,7 @@ impl Gatekeeper {
                 &parent_id,
                 chain_length,
                 req,
+                namespace,
             )
             .is_ok()
         {
@@ -484,6 +499,7 @@ impl Gatekeeper {
         parent_id: &str,
         chain_length: u32,
         req: &IngestionRequest,
+        namespace: &str,
     ) -> Result<(), TunnelError> {
         for (i, orb_id) in orb_ids.iter().enumerate() {
             self.librarian.register_orb(OrbEntry {
@@ -500,6 +516,7 @@ impl Gatekeeper {
                 content_type: Self::content_type(req).as_str().to_string(),
                 pinned: req.pinned.unwrap_or(false),
                 owner_agent_id: req.agent_id.clone(),
+                namespace: namespace.to_string(),
                 summary: Self::indexing_summary(req).to_string(),
                 answer_facts: Self::fact_atoms(req),
                 summary_author: req.summary_author.clone(),

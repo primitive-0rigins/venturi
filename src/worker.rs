@@ -70,15 +70,30 @@ impl std::fmt::Display for WorkerError {
 
 type Reply<T> = oneshot::Sender<Result<T, TunnelError>>;
 
+#[allow(dead_code)] // legacy unscoped commands remain available outside the HIPAA HTTP profile
 pub enum VenturiCommand {
     Capabilities(oneshot::Sender<SystemCapabilities>),
+    ChainNamespace {
+        parent_id: String,
+        reply: Reply<Option<String>>,
+    },
     Ingest(Box<IngestionRequest>, Reply<IngestionResult>),
+    IngestInNamespace(Box<IngestionRequest>, String, Reply<IngestionResult>),
     ContextWithOptionsAndProof {
         query: String,
         top_k: usize,
         max_tokens: Option<u32>,
         check_stability: bool,
         agent_id: Option<String>,
+        reply: Reply<RetrievalWithProof<Vec<Vec<u8>>>>,
+    },
+    ContextWithOptionsAndProofInNamespace {
+        query: String,
+        top_k: usize,
+        max_tokens: Option<u32>,
+        check_stability: bool,
+        agent_id: Option<String>,
+        namespace: String,
         reply: Reply<RetrievalWithProof<Vec<Vec<u8>>>>,
     },
     DocumentWithBudgetAndProof {
@@ -135,9 +150,22 @@ pub enum VenturiCommand {
         agent_id: Option<String>,
         reply: Reply<RetrievalWithProof<Vec<Vec<u8>>>>,
     },
+    StructuredWithBudgetAndProofInNamespace {
+        filter: StructuredFilter,
+        max_tokens: Option<u32>,
+        agent_id: Option<String>,
+        namespace: String,
+        reply: Reply<RetrievalWithProof<Vec<Vec<u8>>>>,
+    },
     MetadataWithProof {
         filter: StructuredFilter,
         agent_id: Option<String>,
+        reply: Reply<RetrievalWithProof<Vec<MetaRow>>>,
+    },
+    MetadataWithProofInNamespace {
+        filter: StructuredFilter,
+        agent_id: Option<String>,
+        namespace: String,
         reply: Reply<RetrievalWithProof<Vec<MetaRow>>>,
     },
     RecordVerdict {
@@ -150,6 +178,14 @@ pub enum VenturiCommand {
     RetrievalProof {
         retrieval_audit_id: String,
         reply: Reply<Option<RetrievalProof>>,
+    },
+    RecordAdministrativeAction {
+        principal: String,
+        action: String,
+        namespace: String,
+        target_id: String,
+        outcome: String,
+        reply: Reply<()>,
     },
     SetLegalHold {
         parent_id: String,
@@ -197,6 +233,7 @@ pub struct CommandSender {
     tx: mpsc::Sender<VenturiCommand>,
 }
 
+#[allow(dead_code)] // methods correspond to legacy unscoped commands retained for compatibility
 impl CommandSender {
     fn try_send(&self, cmd: VenturiCommand) -> Result<(), WorkerError> {
         self.tx.try_send(cmd).map_err(|error| match error {
@@ -233,8 +270,22 @@ impl CommandSender {
         self.call_infallible(VenturiCommand::Capabilities).await
     }
 
+    pub async fn chain_namespace(&self, parent_id: String) -> Result<Option<String>, WorkerError> {
+        self.call(|reply| VenturiCommand::ChainNamespace { parent_id, reply })
+            .await
+    }
+
     pub async fn ingest(&self, req: IngestionRequest) -> Result<IngestionResult, WorkerError> {
         self.call(|reply| VenturiCommand::Ingest(Box::new(req), reply))
+            .await
+    }
+
+    pub async fn ingest_in_namespace(
+        &self,
+        req: IngestionRequest,
+        namespace: String,
+    ) -> Result<IngestionResult, WorkerError> {
+        self.call(|reply| VenturiCommand::IngestInNamespace(Box::new(req), namespace, reply))
             .await
     }
 
@@ -255,6 +306,30 @@ impl CommandSender {
             agent_id,
             reply,
         })
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn context_with_options_and_proof_in_namespace(
+        &self,
+        query: String,
+        top_k: usize,
+        max_tokens: Option<u32>,
+        check_stability: bool,
+        agent_id: Option<String>,
+        namespace: String,
+    ) -> Result<RetrievalWithProof<Vec<Vec<u8>>>, WorkerError> {
+        self.call(
+            |reply| VenturiCommand::ContextWithOptionsAndProofInNamespace {
+                query,
+                top_k,
+                max_tokens,
+                check_stability,
+                agent_id,
+                namespace,
+                reply,
+            },
+        )
         .await
     }
 
@@ -394,6 +469,24 @@ impl CommandSender {
         })
         .await
     }
+    pub async fn structured_with_budget_and_proof_in_namespace(
+        &self,
+        filter: StructuredFilter,
+        max_tokens: Option<u32>,
+        agent_id: Option<String>,
+        namespace: String,
+    ) -> Result<RetrievalWithProof<Vec<Vec<u8>>>, WorkerError> {
+        self.call(
+            |reply| VenturiCommand::StructuredWithBudgetAndProofInNamespace {
+                filter,
+                max_tokens,
+                agent_id,
+                namespace,
+                reply,
+            },
+        )
+        .await
+    }
 
     pub async fn metadata_with_proof(
         &self,
@@ -403,6 +496,21 @@ impl CommandSender {
         self.call(|reply| VenturiCommand::MetadataWithProof {
             filter,
             agent_id,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn metadata_with_proof_in_namespace(
+        &self,
+        filter: StructuredFilter,
+        agent_id: Option<String>,
+        namespace: String,
+    ) -> Result<RetrievalWithProof<Vec<MetaRow>>, WorkerError> {
+        self.call(|reply| VenturiCommand::MetadataWithProofInNamespace {
+            filter,
+            agent_id,
+            namespace,
             reply,
         })
         .await
@@ -431,6 +539,25 @@ impl CommandSender {
     ) -> Result<Option<RetrievalProof>, WorkerError> {
         self.call(|reply| VenturiCommand::RetrievalProof {
             retrieval_audit_id,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn record_administrative_action(
+        &self,
+        principal: String,
+        action: String,
+        namespace: String,
+        target_id: String,
+        outcome: String,
+    ) -> Result<(), WorkerError> {
+        self.call(|reply| VenturiCommand::RecordAdministrativeAction {
+            principal,
+            action,
+            namespace,
+            target_id,
+            outcome,
             reply,
         })
         .await
@@ -548,8 +675,14 @@ fn handle_command(venturi: &mut Venturi, cmd: VenturiCommand) {
         VenturiCommand::Capabilities(reply) => {
             let _ = reply.send(venturi.capabilities());
         }
+        VenturiCommand::ChainNamespace { parent_id, reply } => {
+            let _ = reply.send(venturi.chain_namespace(&parent_id));
+        }
         VenturiCommand::Ingest(req, reply) => {
             let _ = reply.send(venturi.ingest(*req));
+        }
+        VenturiCommand::IngestInNamespace(req, namespace, reply) => {
+            let _ = reply.send(venturi.ingest_in_namespace(*req, &namespace));
         }
         VenturiCommand::ContextWithOptionsAndProof {
             query,
@@ -565,6 +698,24 @@ fn handle_command(venturi: &mut Venturi, cmd: VenturiCommand) {
                 max_tokens,
                 check_stability,
                 agent_id.as_deref(),
+            ));
+        }
+        VenturiCommand::ContextWithOptionsAndProofInNamespace {
+            query,
+            top_k,
+            max_tokens,
+            check_stability,
+            agent_id,
+            namespace,
+            reply,
+        } => {
+            let _ = reply.send(venturi.context_with_options_and_proof_in_namespace(
+                &query,
+                top_k,
+                max_tokens,
+                check_stability,
+                agent_id.as_deref(),
+                Some(&namespace),
             ));
         }
         VenturiCommand::DocumentWithBudgetAndProof {
@@ -655,12 +806,38 @@ fn handle_command(venturi: &mut Venturi, cmd: VenturiCommand) {
                 agent_id.as_deref(),
             ));
         }
+        VenturiCommand::StructuredWithBudgetAndProofInNamespace {
+            filter,
+            max_tokens,
+            agent_id,
+            namespace,
+            reply,
+        } => {
+            let _ = reply.send(venturi.structured_with_budget_and_proof_in_namespace(
+                filter,
+                max_tokens,
+                agent_id.as_deref(),
+                Some(&namespace),
+            ));
+        }
         VenturiCommand::MetadataWithProof {
             filter,
             agent_id,
             reply,
         } => {
             let _ = reply.send(venturi.metadata_with_proof(filter, agent_id.as_deref()));
+        }
+        VenturiCommand::MetadataWithProofInNamespace {
+            filter,
+            agent_id,
+            namespace,
+            reply,
+        } => {
+            let _ = reply.send(venturi.metadata_with_proof_in_namespace(
+                filter,
+                agent_id.as_deref(),
+                Some(&namespace),
+            ));
         }
         VenturiCommand::RecordVerdict {
             parent_id,
@@ -681,6 +858,18 @@ fn handle_command(venturi: &mut Venturi, cmd: VenturiCommand) {
             reply,
         } => {
             let _ = reply.send(venturi.retrieval_proof(&retrieval_audit_id));
+        }
+        VenturiCommand::RecordAdministrativeAction {
+            principal,
+            action,
+            namespace,
+            target_id,
+            outcome,
+            reply,
+        } => {
+            let _ = reply.send(venturi.record_administrative_action(
+                &principal, &action, &namespace, &target_id, &outcome,
+            ));
         }
         VenturiCommand::SetLegalHold {
             parent_id,

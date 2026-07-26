@@ -34,7 +34,10 @@ mix test
 
 ## Production
 
-The dashboard binds to `127.0.0.1` in production and requires HTTP Basic
-authentication. Set `SECRET_KEY_BASE` and `VENTURI_UI_OPERATOR_PASSWORD`
-(optionally `VENTURI_UI_OPERATOR_USERNAME`), then place a TLS-terminating
-reverse proxy in front of it. Do not expose the dashboard port directly.
+The dashboard binds to `127.0.0.1` in production and uses OIDC Authorization
+Code + PKCE authentication. Set `SECRET_KEY_BASE`,
+`VENTURI_UI_OIDC_ISSUER`, `VENTURI_UI_OIDC_CLIENT_ID`, and the configured
+operator/auditor group mappings, then place a TLS-terminating reverse proxy
+in front of it. Operators may make changes; auditors have read-only routes.
+Do not expose the dashboard port directly. See the root
+[deployment guide](../DEPLOYMENT.md) for the full configuration.

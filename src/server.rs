@@ -103,7 +103,10 @@ impl ServerState {
 /// instead of an unauthenticated, caller-supplied field like `agent_id`
 /// (which a caller could rotate per-request to bypass the limiter entirely).
 #[derive(Clone)]
-struct AuthenticatedKey(String);
+struct AuthenticatedKey {
+    name: String,
+    namespace_grants: Vec<String>,
+}
 
 /// Constant-time string comparison for Bearer token checks, so a caller
 /// probing keys can't learn how many leading bytes matched from response
@@ -126,24 +129,72 @@ async fn require_api_key(
     mut request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    let path = request.uri().path().to_string();
     let token = request
         .headers()
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    let required = required_scope(request.uri().path());
+    let required = required_scope(&path);
     let matched = token.and_then(|token| {
         state
             .api_keys
             .iter()
-            .find(|key| constant_time_eq(&key.value, token) && key.scope.allows(required))
+            .find(|key| constant_time_eq(&key.value, token))
     });
     let Some(matched) = matched else {
+        let _ = state
+            .venturi
+            .record_administrative_action(
+                "unauthenticated".into(),
+                "authentication_denied".into(),
+                "".into(),
+                path,
+                "denied".into(),
+            )
+            .await;
         return Err(StatusCode::UNAUTHORIZED);
     };
-    request
-        .extensions_mut()
-        .insert(AuthenticatedKey(matched.value.clone()));
+    if !matched.scope.allows(required) {
+        let _ = state
+            .venturi
+            .record_administrative_action(
+                matched.name.clone(),
+                "authorization_denied".into(),
+                "".into(),
+                path,
+                "denied".into(),
+            )
+            .await;
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    // Namespace filtering is complete for context, structured, and metadata retrieval.
+    // Fail closed in the HIPAA profile until semantic/graph retrieval is also
+    // namespace-aware; returning content from a global candidate set is never
+    // an acceptable temporary isolation boundary.
+    if venturi::auth::hipaa_profile()
+        && path.starts_with("/retrieve/")
+        && !matches!(
+            path.as_str(),
+            "/retrieve/context" | "/retrieve/structured" | "/retrieve/metadata"
+        )
+    {
+        let _ = state
+            .venturi
+            .record_administrative_action(
+                matched.name.clone(),
+                "authorization_denied".into(),
+                "".into(),
+                path,
+                "denied".into(),
+            )
+            .await;
+        return Err(StatusCode::FORBIDDEN);
+    }
+    request.extensions_mut().insert(AuthenticatedKey {
+        name: matched.name.clone(),
+        namespace_grants: matched.namespaces.clone(),
+    });
     Ok(next.run(request).await)
 }
 
@@ -238,6 +289,7 @@ impl RateLimiter {
 
 #[derive(Deserialize)]
 pub struct IngestBody {
+    pub namespace: String,
     pub agent_id: String,
     pub topic: String,
     pub domain: String,
@@ -282,11 +334,13 @@ pub struct IngestResponse {
 #[derive(Deserialize)]
 pub struct ContextBody {
     pub query: String,
+    pub namespace: String,
     #[serde(default = "default_top_k")]
     pub top_k: usize,
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub check_stability: bool,
+    #[allow(dead_code)] // accepted only for wire compatibility; actor is the credential name
     pub agent_id: Option<String>,
 }
 fn default_top_k() -> usize {
@@ -323,6 +377,7 @@ pub struct ConsensusBody {
 pub struct DocumentBody {
     pub query: String,
     pub max_tokens: Option<u32>,
+    #[allow(dead_code)] // accepted only for wire compatibility; actor is the credential name
     pub agent_id: Option<String>,
 }
 
@@ -337,6 +392,7 @@ pub struct TemporalBody {
 
 #[derive(Deserialize)]
 pub struct StructuredBody {
+    pub namespace: String,
     pub topic: Option<String>,
     pub domain: Option<String>,
     pub tier: Option<String>,
@@ -346,11 +402,13 @@ pub struct StructuredBody {
     pub date_from: Option<String>,
     pub date_to: Option<String>,
     pub max_tokens: Option<u32>,
+    #[allow(dead_code)] // accepted only for wire compatibility; actor is the credential name
     pub agent_id: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct MetadataBody {
+    pub namespace: String,
     pub topic: Option<String>,
     pub domain: Option<String>,
     pub tier: Option<String>,
@@ -359,11 +417,13 @@ pub struct MetadataBody {
     pub classification: Option<String>,
     pub date_from: Option<String>,
     pub date_to: Option<String>,
+    #[allow(dead_code)] // accepted only for wire compatibility; actor is the credential name
     pub agent_id: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct VerdictBody {
+    pub namespace: String,
     pub parent_id: String,
     pub orb_ids: Vec<String>,
     /// 1 = useful, 0 = not useful
@@ -375,12 +435,14 @@ pub struct VerdictBody {
 
 #[derive(Deserialize)]
 pub struct HoldBody {
+    pub namespace: String,
     pub parent_id: String,
     pub reason: String,
 }
 
 #[derive(Deserialize)]
 pub struct ChainLinkBody {
+    pub namespace: String,
     pub from_parent_id: String,
     pub to_parent_id: String,
     pub reference_type: String,
@@ -389,6 +451,44 @@ pub struct ChainLinkBody {
 #[derive(Deserialize)]
 pub struct ForesightQuery {
     pub on: String,
+}
+
+#[derive(Deserialize)]
+pub struct NamespaceQuery {
+    pub namespace: String,
+}
+
+fn ensure_namespace_granted(
+    auth: &AuthenticatedKey,
+    namespace: &str,
+) -> Result<(), (StatusCode, String)> {
+    if auth
+        .namespace_grants
+        .iter()
+        .any(|grant| grant == "*" || grant == namespace)
+    {
+        Ok(())
+    } else {
+        Err((StatusCode::FORBIDDEN, "namespace access denied".into()))
+    }
+}
+
+async fn ensure_parent_namespace(
+    state: &ServerState,
+    auth: &AuthenticatedKey,
+    parent_id: &str,
+    namespace: &str,
+) -> Result<(), (StatusCode, String)> {
+    ensure_namespace_granted(auth, namespace)?;
+    let actual = state
+        .venturi
+        .chain_namespace(parent_id.to_string())
+        .await
+        .map_err(worker_error)?;
+    if actual.as_deref() != Some(namespace) {
+        return Err((StatusCode::NOT_FOUND, "chain not found in namespace".into()));
+    }
+    Ok(())
 }
 
 /// Generic response wrapper: content chunks encoded as base64.
@@ -606,7 +706,7 @@ async fn ingest(
     Extension(auth): Extension<AuthenticatedKey>,
     Json(body): Json<IngestBody>,
 ) -> Result<Json<IngestResponse>, (StatusCode, String)> {
-    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Ingest)?;
+    enforce_rate_limit(&state, &auth.name, RateLimitedOp::Ingest)?;
 
     // Decode base64 chunks → raw bytes
     let chunks: Vec<Vec<u8>> = body
@@ -626,7 +726,9 @@ async fn ingest(
     })?;
 
     let req = IngestionRequest {
-        agent_id: body.agent_id,
+        // Request agent_id is retained only as compatibility input. The credential name
+        // is the authoritative service principal for storage and audit attribution.
+        agent_id: auth.name,
         topic: body.topic,
         domain: body.domain,
         date: body.date,
@@ -646,7 +748,18 @@ async fn ingest(
         chunks,
     };
 
-    let result = state.venturi.ingest(req).await.map_err(worker_error)?;
+    if !auth
+        .namespace_grants
+        .iter()
+        .any(|grant| grant == "*" || grant == &body.namespace)
+    {
+        return Err((StatusCode::FORBIDDEN, "namespace access denied".to_string()));
+    }
+    let result = state
+        .venturi
+        .ingest_in_namespace(req, body.namespace)
+        .await
+        .map_err(worker_error)?;
 
     Ok(Json(IngestResponse {
         orb_count: result.orb_ids.len(),
@@ -660,16 +773,18 @@ async fn retrieve_context(
     Extension(auth): Extension<AuthenticatedKey>,
     Json(body): Json<ContextBody>,
 ) -> Result<Json<ChunksResponse>, (StatusCode, String)> {
-    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Retrieval)?;
+    enforce_rate_limit(&state, &auth.name, RateLimitedOp::Retrieval)?;
+    ensure_namespace_granted(&auth, &body.namespace)?;
 
     let result = state
         .venturi
-        .context_with_options_and_proof(
+        .context_with_options_and_proof_in_namespace(
             body.query,
             body.top_k,
             body.max_tokens,
             body.check_stability,
-            body.agent_id,
+            Some(auth.name),
+            body.namespace,
         )
         .await
         .map_err(worker_error)?;
@@ -692,11 +807,11 @@ async fn retrieve_document(
     Extension(auth): Extension<AuthenticatedKey>,
     Json(body): Json<DocumentBody>,
 ) -> Result<Json<DocumentResponse>, (StatusCode, String)> {
-    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Retrieval)?;
+    enforce_rate_limit(&state, &auth.name, RateLimitedOp::Retrieval)?;
 
     let result = state
         .venturi
-        .document_with_budget_and_proof(body.query, body.max_tokens, body.agent_id)
+        .document_with_budget_and_proof(body.query, body.max_tokens, Some(auth.name))
         .await
         .map_err(worker_error)?;
 
@@ -716,7 +831,7 @@ async fn retrieve_document_by_id(
     Extension(auth): Extension<AuthenticatedKey>,
     Path(parent_id): Path<String>,
 ) -> Result<Json<DocumentResponse>, (StatusCode, String)> {
-    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Retrieval)?;
+    enforce_rate_limit(&state, &auth.name, RateLimitedOp::Retrieval)?;
 
     let result = state
         .venturi
@@ -847,7 +962,7 @@ async fn retrieve_document_stream(
     Extension(auth): Extension<AuthenticatedKey>,
     Path(parent_id): Path<String>,
 ) -> Result<Response, (StatusCode, String)> {
-    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Retrieval)?;
+    enforce_rate_limit(&state, &auth.name, RateLimitedOp::Retrieval)?;
 
     let orb_ids = state
         .venturi
@@ -877,7 +992,7 @@ async fn retrieve_graph(
     Extension(auth): Extension<AuthenticatedKey>,
     Json(body): Json<GraphBody>,
 ) -> Result<Json<ChunksResponse>, (StatusCode, String)> {
-    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Retrieval)?;
+    enforce_rate_limit(&state, &auth.name, RateLimitedOp::Retrieval)?;
 
     let result = state
         .venturi
@@ -903,7 +1018,7 @@ async fn retrieve_consensus(
     Extension(auth): Extension<AuthenticatedKey>,
     Json(body): Json<ConsensusBody>,
 ) -> Result<Json<ConsensusResponse>, (StatusCode, String)> {
-    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Retrieval)?;
+    enforce_rate_limit(&state, &auth.name, RateLimitedOp::Retrieval)?;
 
     let result = state
         .venturi
@@ -946,7 +1061,7 @@ async fn retrieve_temporal(
     Extension(auth): Extension<AuthenticatedKey>,
     Json(body): Json<TemporalBody>,
 ) -> Result<Json<ChunksResponse>, (StatusCode, String)> {
-    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Retrieval)?;
+    enforce_rate_limit(&state, &auth.name, RateLimitedOp::Retrieval)?;
 
     let result = state
         .venturi
@@ -978,7 +1093,14 @@ async fn retrieve_structured(
     Extension(auth): Extension<AuthenticatedKey>,
     Json(body): Json<StructuredBody>,
 ) -> Result<Json<ChunksResponse>, (StatusCode, String)> {
-    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Retrieval)?;
+    enforce_rate_limit(&state, &auth.name, RateLimitedOp::Retrieval)?;
+    if !auth
+        .namespace_grants
+        .iter()
+        .any(|grant| grant == "*" || grant == &body.namespace)
+    {
+        return Err((StatusCode::FORBIDDEN, "namespace access denied".into()));
+    }
 
     let filter = StructuredFilter {
         topic: body.topic,
@@ -993,7 +1115,12 @@ async fn retrieve_structured(
 
     let result = state
         .venturi
-        .structured_with_budget_and_proof(filter, body.max_tokens, body.agent_id)
+        .structured_with_budget_and_proof_in_namespace(
+            filter,
+            body.max_tokens,
+            Some(auth.name),
+            body.namespace,
+        )
         .await
         .map_err(worker_error)?;
 
@@ -1015,7 +1142,14 @@ async fn retrieve_metadata(
     Extension(auth): Extension<AuthenticatedKey>,
     Json(body): Json<MetadataBody>,
 ) -> Result<Json<MetadataResponse>, (StatusCode, String)> {
-    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Retrieval)?;
+    enforce_rate_limit(&state, &auth.name, RateLimitedOp::Retrieval)?;
+    if !auth
+        .namespace_grants
+        .iter()
+        .any(|grant| grant == "*" || grant == &body.namespace)
+    {
+        return Err((StatusCode::FORBIDDEN, "namespace access denied".into()));
+    }
 
     let filter = StructuredFilter {
         topic: body.topic,
@@ -1030,7 +1164,7 @@ async fn retrieve_metadata(
 
     let result = state
         .venturi
-        .metadata_with_proof(filter, body.agent_id)
+        .metadata_with_proof_in_namespace(filter, Some(auth.name), body.namespace)
         .await
         .map_err(worker_error)?;
 
@@ -1044,15 +1178,28 @@ async fn retrieve_metadata(
 
 async fn verdict(
     State(state): State<ServerState>,
+    Extension(auth): Extension<AuthenticatedKey>,
     Json(body): Json<VerdictBody>,
 ) -> Result<Json<OkResponse>, (StatusCode, String)> {
+    ensure_parent_namespace(&state, &auth, &body.parent_id, &body.namespace).await?;
     state
         .venturi
         .record_verdict(
-            body.parent_id,
+            body.parent_id.clone(),
             body.orb_ids,
             body.expected_orb_ids,
             body.verdict,
+        )
+        .await
+        .map_err(worker_error)?;
+    state
+        .venturi
+        .record_administrative_action(
+            auth.name,
+            "verdict".into(),
+            body.namespace,
+            body.parent_id,
+            "success".into(),
         )
         .await
         .map_err(worker_error)?;
@@ -1064,8 +1211,10 @@ async fn audit(
     State(state): State<ServerState>,
     Extension(auth): Extension<AuthenticatedKey>,
     Path(retrieval_audit_id): Path<String>,
+    Query(query): Query<NamespaceQuery>,
 ) -> Result<Json<AuditResponse>, (StatusCode, String)> {
-    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Retrieval)?;
+    enforce_rate_limit(&state, &auth.name, RateLimitedOp::Retrieval)?;
+    ensure_namespace_granted(&auth, &query.namespace)?;
 
     let proof = state
         .venturi
@@ -1081,16 +1230,33 @@ async fn audit(
             (StatusCode::NOT_FOUND, body.to_string())
         })?;
 
+    for parent_id in &proof.selected_parent_ids {
+        ensure_parent_namespace(&state, &auth, parent_id, &query.namespace).await?;
+    }
+
     Ok(Json(AuditResponse { proof }))
 }
 
 async fn hold(
     State(state): State<ServerState>,
+    Extension(auth): Extension<AuthenticatedKey>,
     Json(body): Json<HoldBody>,
 ) -> Result<Json<OkResponse>, (StatusCode, String)> {
+    ensure_parent_namespace(&state, &auth, &body.parent_id, &body.namespace).await?;
     state
         .venturi
-        .set_legal_hold(body.parent_id, body.reason)
+        .set_legal_hold(body.parent_id.clone(), body.reason)
+        .await
+        .map_err(worker_error)?;
+    state
+        .venturi
+        .record_administrative_action(
+            auth.name,
+            "legal_hold_set".into(),
+            body.namespace,
+            body.parent_id,
+            "success".into(),
+        )
         .await
         .map_err(worker_error)?;
 
@@ -1099,11 +1265,25 @@ async fn hold(
 
 async fn release_hold(
     State(state): State<ServerState>,
+    Extension(auth): Extension<AuthenticatedKey>,
     Path(parent_id): Path<String>,
+    Query(query): Query<NamespaceQuery>,
 ) -> Result<Json<OkResponse>, (StatusCode, String)> {
+    ensure_parent_namespace(&state, &auth, &parent_id, &query.namespace).await?;
     state
         .venturi
-        .release_legal_hold(parent_id)
+        .release_legal_hold(parent_id.clone())
+        .await
+        .map_err(worker_error)?;
+    state
+        .venturi
+        .record_administrative_action(
+            auth.name,
+            "legal_hold_released".into(),
+            query.namespace,
+            parent_id,
+            "success".into(),
+        )
         .await
         .map_err(worker_error)?;
 
@@ -1112,11 +1292,29 @@ async fn release_hold(
 
 async fn link_chain(
     State(state): State<ServerState>,
+    Extension(auth): Extension<AuthenticatedKey>,
     Json(body): Json<ChainLinkBody>,
 ) -> Result<Json<OkResponse>, (StatusCode, String)> {
+    ensure_parent_namespace(&state, &auth, &body.from_parent_id, &body.namespace).await?;
+    ensure_parent_namespace(&state, &auth, &body.to_parent_id, &body.namespace).await?;
     state
         .venturi
-        .link_chains(body.from_parent_id, body.to_parent_id, body.reference_type)
+        .link_chains(
+            body.from_parent_id.clone(),
+            body.to_parent_id,
+            body.reference_type,
+        )
+        .await
+        .map_err(worker_error)?;
+    state
+        .venturi
+        .record_administrative_action(
+            auth.name,
+            "chain_linked".into(),
+            body.namespace,
+            body.from_parent_id,
+            "success".into(),
+        )
         .await
         .map_err(worker_error)?;
 
@@ -1125,8 +1323,11 @@ async fn link_chain(
 
 async fn chain_references(
     State(state): State<ServerState>,
+    Extension(auth): Extension<AuthenticatedKey>,
     Path(parent_id): Path<String>,
+    Query(query): Query<NamespaceQuery>,
 ) -> Result<Json<ChainReferencesResponse>, (StatusCode, String)> {
+    ensure_parent_namespace(&state, &auth, &parent_id, &query.namespace).await?;
     let references = state
         .venturi
         .chain_references(parent_id)
@@ -1148,7 +1349,7 @@ async fn retrieve_foresights(
     Extension(auth): Extension<AuthenticatedKey>,
     Query(query): Query<ForesightQuery>,
 ) -> Result<Json<ForesightsResponse>, (StatusCode, String)> {
-    enforce_rate_limit(&state, &auth.0, RateLimitedOp::Retrieval)?;
+    enforce_rate_limit(&state, &auth.name, RateLimitedOp::Retrieval)?;
     let foresights = state
         .venturi
         .foresights(query.on)
@@ -1532,8 +1733,10 @@ mod tests {
     #[tokio::test]
     async fn protected_route_with_wrong_key_is_rejected() {
         let (router, _dir) = test_router(vec![ApiKey {
+            name: "test".to_string(),
             value: "correct-key".to_string(),
             scope: Scope::Admin,
+            namespaces: vec!["*".to_string()],
         }]);
         let response = router
             .oneshot(request("POST", "/ingest", Some("wrong-key")))
@@ -1545,8 +1748,10 @@ mod tests {
     #[tokio::test]
     async fn admin_key_passes_middleware_on_write_route() {
         let (router, _dir) = test_router(vec![ApiKey {
+            name: "test".to_string(),
             value: "admin-key".to_string(),
             scope: Scope::Admin,
+            namespaces: vec!["*".to_string()],
         }]);
         let response = router
             .oneshot(request("POST", "/ingest", Some("admin-key")))
@@ -1560,8 +1765,10 @@ mod tests {
     #[tokio::test]
     async fn read_scoped_key_is_rejected_on_write_route() {
         let (router, _dir) = test_router(vec![ApiKey {
+            name: "test".to_string(),
             value: "read-key".to_string(),
             scope: Scope::Read,
+            namespaces: vec!["*".to_string()],
         }]);
         let response = router
             .oneshot(request("POST", "/ingest", Some("read-key")))
@@ -1573,8 +1780,10 @@ mod tests {
     #[tokio::test]
     async fn read_scoped_key_passes_middleware_on_read_route() {
         let (router, _dir) = test_router(vec![ApiKey {
+            name: "test".to_string(),
             value: "read-key".to_string(),
             scope: Scope::Read,
+            namespaces: vec!["*".to_string()],
         }]);
         let response = router
             .oneshot(request(
@@ -1591,8 +1800,10 @@ mod tests {
     async fn rate_limit_is_keyed_by_authenticated_key_not_caller_supplied_agent_id() {
         let (router, _dir) = test_router_with_rate_limits(
             vec![ApiKey {
+                name: "test".to_string(),
                 value: "shared-key".to_string(),
                 scope: Scope::Admin,
+                namespaces: vec!["*".to_string()],
             }],
             RateLimitConfig {
                 ingest_limit: 1,
@@ -1607,7 +1818,7 @@ mod tests {
                 "POST",
                 "/retrieve/context",
                 "shared-key",
-                serde_json::json!({"query": "hello", "agent_id": "agent-a"}),
+                serde_json::json!({"query": "hello", "namespace": "default", "agent_id": "agent-a"}),
             ))
             .await
             .unwrap();
@@ -1622,11 +1833,31 @@ mod tests {
                 "POST",
                 "/retrieve/context",
                 "shared-key",
-                serde_json::json!({"query": "hello", "agent_id": "agent-b"}),
+                serde_json::json!({"query": "hello", "namespace": "default", "agent_id": "agent-b"}),
             ))
             .await
             .unwrap();
         assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn context_rejects_a_namespace_outside_the_key_grant() {
+        let (router, _dir) = test_router(vec![ApiKey {
+            name: "clinical-reader".to_string(),
+            value: "clinical-key".to_string(),
+            scope: Scope::Read,
+            namespaces: vec!["clinical".to_string()],
+        }]);
+        let response = router
+            .oneshot(json_request(
+                "POST",
+                "/retrieve/context",
+                "clinical-key",
+                serde_json::json!({"query": "hello", "namespace": "billing"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     // ── streamed document retrieval (roadmap B2) ──────────────────────────
@@ -1669,11 +1900,14 @@ mod tests {
     #[tokio::test]
     async fn streamed_document_matches_non_streaming_reassembly() {
         let (router, _dir) = test_router(vec![ApiKey {
+            name: "test".to_string(),
             value: "admin-key".to_string(),
             scope: Scope::Admin,
+            namespaces: vec!["*".to_string()],
         }]);
 
         let ingest_body = serde_json::json!({
+            "namespace": "default",
             "agent_id": "stream-test-agent",
             "topic": "streaming",
             "domain": "test",
@@ -1752,7 +1986,7 @@ mod tests {
         let audit_response = router
             .oneshot(request(
                 "GET",
-                &format!("/audit/{retrieval_audit_id}"),
+                &format!("/audit/{retrieval_audit_id}?namespace=default"),
                 Some("admin-key"),
             ))
             .await
@@ -1763,8 +1997,10 @@ mod tests {
     #[tokio::test]
     async fn streaming_unknown_parent_id_returns_not_found_without_a_body() {
         let (router, _dir) = test_router(vec![ApiKey {
+            name: "test".to_string(),
             value: "admin-key".to_string(),
             scope: Scope::Admin,
+            namespaces: vec!["*".to_string()],
         }]);
 
         let response = router

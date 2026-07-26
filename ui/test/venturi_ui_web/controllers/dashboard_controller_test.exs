@@ -26,30 +26,34 @@ defmodule VenturiUiWeb.DashboardControllerTest do
     assert html_response(conn, 200) =~ "Could not reach Venturi"
   end
 
-  test "GET / requires operator credentials when configured" do
-    previous = Application.get_env(:venturi_ui, :operator_auth)
-
-    Application.put_env(:venturi_ui, :operator_auth,
-      username: "operator",
-      password: "test-password"
-    )
-
-    on_exit(fn -> Application.put_env(:venturi_ui, :operator_auth, previous) end)
-
-    assert get(build_conn(), ~p"/").status == 401
-
-    Req.Test.stub(VenturiUi.VenturiClient, fn conn ->
-      Req.Test.json(conn, %{"ok" => true, "capabilities" => %{}})
-    end)
+  test "expired OIDC session is redirected to sign-in", %{conn: conn} do
+    Application.put_env(:venturi_ui, :oidc_test_bypass, false)
+    on_exit(fn -> Application.put_env(:venturi_ui, :oidc_test_bypass, true) end)
 
     conn =
-      build_conn()
-      |> put_req_header(
-        "authorization",
-        Plug.BasicAuth.encode_basic_auth("operator", "test-password")
-      )
+      conn
+      |> init_test_session(%{role: "auditor", authenticated_at: 0})
       |> get(~p"/")
 
-    assert html_response(conn, 200) =~ "Online"
+    assert redirected_to(conn) == "/auth/oidc"
+  end
+
+  test "auditor cannot perform operator hold actions", %{conn: conn} do
+    Application.put_env(:venturi_ui, :oidc_test_bypass, false)
+    on_exit(fn -> Application.put_env(:venturi_ui, :oidc_test_bypass, true) end)
+
+    conn =
+      conn
+      |> init_test_session(%{role: "auditor", authenticated_at: System.system_time(:second)})
+      |> post(~p"/holds", %{"parent_id" => "chain", "namespace" => "clinical", "reason" => "test"})
+
+    assert response(conn, 403) == "operator role required"
+  end
+
+  test "OIDC callback without a valid authorization response is denied", %{conn: conn} do
+    conn = get(conn, ~p"/auth/oidc/callback")
+
+    assert redirected_to(conn) == "/"
+    assert Phoenix.Flash.get(conn.assigns.flash, :error) == "Sign-in was denied"
   end
 end

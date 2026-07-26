@@ -28,6 +28,10 @@ if api_key = System.get_env("VENTURI_API_KEY") do
   config :venturi_ui, :venturi_api, api_key: api_key
 end
 
+if namespace = System.get_env("VENTURI_NAMESPACE") do
+  config :venturi_ui, :venturi_api, namespace: namespace
+end
+
 if config_env() == :prod do
   # The secret key base is used to sign/encrypt cookies and other secrets.
   # A default value is used in config/dev.exs and config/test.exs but you
@@ -44,14 +48,32 @@ if config_env() == :prod do
   host = System.get_env("PHX_HOST") || "example.com"
   port = String.to_integer(System.get_env("PORT") || "4000")
 
-  operator_password =
-    System.get_env("VENTURI_UI_OPERATOR_PASSWORD") ||
-      raise "environment variable VENTURI_UI_OPERATOR_PASSWORD is missing."
+  issuer = System.fetch_env!("VENTURI_UI_OIDC_ISSUER")
+  client_id = System.fetch_env!("VENTURI_UI_OIDC_CLIENT_ID")
 
-  operator_username = System.get_env("VENTURI_UI_OPERATOR_USERNAME") || "operator"
+  redirect_uri =
+    System.get_env("VENTURI_UI_OIDC_REDIRECT_URI") || "https://#{host}/auth/oidc/callback"
 
   config :venturi_ui, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
-  config :venturi_ui, :operator_auth, username: operator_username, password: operator_password
+
+  config :venturi_ui, :oidc,
+    issuer: issuer,
+    client_id: client_id,
+    client_secret: System.get_env("VENTURI_UI_OIDC_CLIENT_SECRET"),
+    client_authentication_method:
+      if(System.get_env("VENTURI_UI_OIDC_CLIENT_SECRET"), do: :client_secret_basic, else: :none),
+    redirect_uri: redirect_uri,
+    group_claim: System.get_env("VENTURI_UI_OIDC_GROUP_CLAIM") || "groups",
+    operator_groups:
+      String.split(System.get_env("VENTURI_UI_OIDC_OPERATOR_GROUPS") || "venturi-operator", ",",
+        trim: true
+      ),
+    auditor_groups:
+      String.split(System.get_env("VENTURI_UI_OIDC_AUDITOR_GROUPS") || "venturi-auditor", ",",
+        trim: true
+      ),
+    session_ttl_seconds:
+      String.to_integer(System.get_env("VENTURI_UI_SESSION_TTL_SECONDS") || "900")
 
   config :venturi_ui, VenturiUiWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],

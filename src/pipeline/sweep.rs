@@ -16,8 +16,12 @@ const USEFULNESS_FEEDBACK_EPOCH: &str = "0";
 /// after thirty days; the sweep updates only those two non-hot tiers.
 const TIER_WARM_SECS: u64 = 30 * 86400;
 
-/// 90-day expiry window. Chains not accessed in 90 days eject to dataset.
-const EXPIRY_DAYS: u64 = 90;
+/// Retention is a customer policy, not a product legal default. `None` keeps
+/// historical deployments on the former 90-day behavior for compatibility.
+pub enum RetentionPolicy {
+    Days(u64),
+    Indefinite,
+}
 
 /// Background maintenance sweeps for Venturi.
 ///
@@ -104,7 +108,8 @@ impl<'a> Sweeper<'a> {
         })
     }
 
-    /// Expiry sweep — run once daily.
+    /// Expiry sweep — run once daily. Indefinite retention intentionally makes
+    /// this a no-op; legal holds are always preserved.
     ///
     /// Finds chains not accessed in 90 days. For each expired chain:
     ///   1. Ejects catalog entries (returns orb_ids)
@@ -115,13 +120,30 @@ impl<'a> Sweeper<'a> {
     /// No Scribe EXIT event is written — expiry is a lifecycle action,
     /// not a retrieval verdict. Downstream dataset tooling reads the
     /// Scribe EXIT events written by agents, not by the sweep clock.
-    pub fn sweep_expiry(&self) -> Result<SweepReport, TunnelError> {
-        let expired = self.librarian.expired_chains(EXPIRY_DAYS)?;
+    pub fn sweep_expiry(
+        &self,
+        retention: Option<&RetentionPolicy>,
+    ) -> Result<SweepReport, TunnelError> {
+        let days = match retention {
+            Some(RetentionPolicy::Indefinite) => {
+                return Ok(SweepReport {
+                    sweep: "expiry",
+                    chains_affected: 0,
+                    orbs_ejected: 0,
+                })
+            }
+            Some(RetentionPolicy::Days(days)) => *days,
+            None => 90,
+        };
+        let expired = self.librarian.expired_chains(days)?;
         let mut total_ejected = 0u32;
         let mut chains_affected = 0u32;
 
         for parent_id in &expired {
             if self.librarian.chain_on_legal_hold(parent_id)? {
+                let _ = self
+                    .scribe
+                    .record_retention_decision(parent_id, "preserved_legal_hold");
                 continue;
             }
 
@@ -136,6 +158,9 @@ impl<'a> Sweeper<'a> {
 
             self.keystore.remove_by_parent(parent_id)?;
             self.graph.eject_chain(parent_id)?;
+            let _ = self
+                .scribe
+                .record_retention_decision(parent_id, "deleted_expired");
 
             total_ejected += orb_ids.len() as u32;
             chains_affected += 1;

@@ -4,6 +4,13 @@ Venturi is a local, encrypted memory system for AI applications. It stores
 original content as sealed chunks, indexes summaries and graph metadata in
 SQLite, and rehydrates the original bytes on retrieval.
 
+> Portfolio and deployment disclaimer: Venturi is an engineering project, not
+> a HIPAA certification, compliance determination, hosted healthcare service,
+> BAA, or legal advice. Its HIPAA-ready profile is a self-hosted technical
+> safeguard baseline; the deploying organization remains responsible for risk
+> analysis, policies, workforce controls, physical safeguards, contracts, and
+> validating its production environment.
+
 ## Run locally
 
 Venturi requires an administrator API key. A local Ollama-compatible embedding
@@ -25,8 +32,10 @@ Optional environment variables:
 - `VENTURI_EMBEDDING_MODEL` and `VENTURI_EMBEDDING_DIM` — embedding settings.
 - `VENTURI_ADMIN_KEY` — required administrator key. Venturi refuses to start
   without it.
-- `VENTURI_AGENT_KEYS` — optional comma-separated `name:key:scope` entries;
-  `scope` is `read`, `write`, or `admin`.
+- `VENTURI_AGENT_KEYS` — optional comma-separated `name:key:scope:namespaces`
+  entries; namespaces are `|`-separated. The three-field legacy form grants
+  all namespaces and is rejected by the HIPAA profile.
+- `VENTURI_RETENTION_DAYS` — a positive duration in days or `indefinite`.
 
 ## Security boundary
 
@@ -42,8 +51,11 @@ put it behind TLS and a network boundary.
 `ui/` is a standalone Elixir/Phoenix app that gives an operator a read/light-write
 console over the API: health, retrieval audit lookup, chain references, and
 legal hold. It talks to Venturi over HTTP and adds no new backend endpoints.
-In production it binds only to localhost, requires HTTP Basic authentication,
-and expects a TLS-terminating reverse proxy.
+In production it binds only to localhost, requires OIDC Authorization Code +
+PKCE authentication, and expects a TLS-terminating reverse proxy.
+
+Configure issuer, client ID, PKCE redirect URI, and IdP groups before enabling
+the HIPAA-ready profile; see [HIPAA_READINESS.md](HIPAA_READINESS.md).
 
 ```bash
 cd ui
@@ -51,9 +63,9 @@ mix deps.get
 VENTURI_API_URL="http://127.0.0.1:9271" VENTURI_API_KEY="$VENTURI_ADMIN_KEY" mix phx.server
 ```
 
-For a production dashboard, set `SECRET_KEY_BASE`,
-`VENTURI_UI_OPERATOR_PASSWORD`, and (optionally)
-`VENTURI_UI_OPERATOR_USERNAME`; expose it only through a TLS reverse proxy.
+For a production dashboard, set `SECRET_KEY_BASE`, the OIDC issuer/client
+configuration, and the operator/auditor group mappings; expose it only through
+a TLS reverse proxy. Basic-auth environment variables are not used.
 
 ## Verify
 

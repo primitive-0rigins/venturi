@@ -7,6 +7,7 @@ defmodule VenturiUi.VenturiClient do
   defp config, do: Application.get_env(:venturi_ui, :venturi_api, [])
 
   defp base_url, do: Keyword.fetch!(config(), :base_url)
+  defp namespace, do: Keyword.get(config(), :namespace, "default")
 
   defp req do
     opts = [base_url: base_url(), retry: false]
@@ -28,7 +29,20 @@ defmodule VenturiUi.VenturiClient do
 
   @doc "GET /health"
   def health do
-    req() |> Req.get(url: "/health") |> respond()
+    if Application.get_env(:venturi_ui, :demo_mode, false) do
+      {:ok,
+       %{
+         "ok" => true,
+         "capabilities" => %{
+           "embedding" => "ready",
+           "graph" => "ready",
+           "ingest" => "ready",
+           "retrieval" => "ready"
+         }
+       }}
+    else
+      req() |> Req.get(url: "/health") |> respond()
+    end
   end
 
   @doc "GET /audit/:retrieval_audit_id"
@@ -38,12 +52,18 @@ defmodule VenturiUi.VenturiClient do
 
   @doc "GET /chain/references/:parent_id"
   def chain_references(parent_id) do
-    req() |> Req.get(url: "/chain/references/#{encode_segment(parent_id)}") |> respond()
+    req()
+    |> Req.get(
+      url: "/chain/references/#{encode_segment(parent_id)}",
+      params: [namespace: namespace()]
+    )
+    |> respond()
   end
 
   @doc "POST /chain/link"
   def link_chain(from_parent_id, to_parent_id, reference_type) do
     body = %{
+      namespace: namespace(),
       from_parent_id: from_parent_id,
       to_parent_id: to_parent_id,
       reference_type: reference_type
@@ -55,13 +75,18 @@ defmodule VenturiUi.VenturiClient do
   @doc "POST /hold"
   def place_hold(parent_id, reason) do
     req()
-    |> Req.post(url: "/hold", json: %{parent_id: parent_id, reason: reason})
+    |> Req.post(
+      url: "/hold",
+      json: %{namespace: namespace(), parent_id: parent_id, reason: reason}
+    )
     |> respond()
   end
 
   @doc "DELETE /hold/:parent_id"
   def release_hold(parent_id) do
-    req() |> Req.delete(url: "/hold/#{encode_segment(parent_id)}") |> respond()
+    req()
+    |> Req.delete(url: "/hold/#{encode_segment(parent_id)}", params: [namespace: namespace()])
+    |> respond()
   end
 
   # `URI.encode/1`'s default predicate leaves reserved characters like `/`, `?`,

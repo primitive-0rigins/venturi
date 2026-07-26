@@ -12,6 +12,8 @@ config :venturi_ui, :venturi_api,
   base_url: "http://venturi.test",
   plug: {Req.Test, VenturiUi.VenturiClient}
 
+config :venturi_ui, :oidc_test_bypass, true
+
 # Print only warnings and errors during test
 config :logger, level: :warning
 

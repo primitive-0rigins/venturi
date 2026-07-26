@@ -30,7 +30,7 @@ pub use intelligence::gatekeeper::{ContentType, IngestionRequest, IngestionResul
 pub use intelligence::librarian::{
     ChainReference, ForesightRow, LifecycleConfig, MetaRow, StructuredFilter,
 };
-pub use intelligence::scribe::RetrievalProof;
+pub use intelligence::scribe::{AuditExport, RetrievalProof};
 pub use pipeline::retrieval::RetrievalPipeline;
 pub use pipeline::tunnel::WormholeTunnel;
 pub use storage::shelf::OrbShelf;

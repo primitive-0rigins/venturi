@@ -40,7 +40,9 @@ The atomic unit of Venturi. An orb is a sealed, encrypted, compressed chunk of o
 - Addressed by **OrbId**: SHA256 of the encrypted blob post-Gate 3, including the nonce. Computed after encryption, not before. This means two identical documents ingested separately get different OrbIds (different keys, different nonces) — no collisions, no deduplication across ingestions.
 - Stores **full original content** — not a summary, not a fragment of a summary
 - The 100-word summary attached at ingestion is the **retrieval anchor only** — it is indexed, not stored as the content
-- Orbs are immutable once written. No updates. No deletes. Only expiry (90-day shelf) and replacement (new orb, new id)
+- Orbs are immutable once written. They are removed only by the configured
+  retention process (unless retention is `indefinite`) or replaced by a new
+  ingestion; legal holds prevent retention deletion.
 - A single document that exceeds one orb in size is split into a **chain**: multiple orbs sharing a `parent_id`, each with a `sequence` number
 
 ### The Wormhole
@@ -133,7 +135,7 @@ SQLite database. The index of all orbs. Does not hold content. Does not hold raw
 | sequence | INTEGER | Position in chain (1 of N) |
 | chain_length | INTEGER | Total orbs in chain |
 | tier | TEXT | hot / warm / cold |
-| last_accessed | TEXT | Timestamp — used for 90-day expiry |
+| last_accessed | TEXT | Timestamp used by the configured retention policy |
 | embedding | BLOB | Nomic embed of 100-word summary (hot/warm only) |
 | format | TEXT | Output format declared at ingestion: "md" / "json" / "text" |
 
@@ -172,7 +174,8 @@ Each edge = a named relationship between two nodes (e.g., "treats", "regulates",
 A third retrieval mode alongside chunk and document. Given a query, the graph finds concepts and traverses relationships — returning the orb chains connected to those concepts. Useful for multi-hop questions: "what documents discuss both X and its relationship to Y?"
 
 **Graph tiers:**  
-Nodes and edges follow the same 90-day shelf logic as orbs. When a chain expires and ejects to dataset, its references are removed from the graph. If a node has no remaining references, the node is removed.
+When a non-held chain reaches the configured retention period, its graph
+references are removed. A node with no remaining references is removed.
 
 ---
 
@@ -181,7 +184,9 @@ The "little box" outside the exit gate. Separate file, separate directory, separ
 
 **Contents:** `key_id → raw ChaCha20-Poly1305 key`  
 **One entry per chain** (one key per `parent_id`)  
-**Lifecycle:** Key written by Gate 3 at ingestion. Key removed when all orbs in the chain eject to dataset at 90-day expiry.
+**Lifecycle:** Key written by Gate 3 at ingestion. Key removed when the chain
+is deleted by the configured retention process; a legal hold prevents that
+deletion.
 
 This is the only place in the system where raw keys exist. The Librarian cannot decrypt. The OrbShelf cannot decrypt. Only the exit gate, reading from this box, can decrypt.
 
@@ -274,7 +279,10 @@ All reassembly is in transit. The document is never fully materialized until the
 
 ### 8. Scribe (End-to-End Event Recorder)
 
-Scribe is the event log for the entire Venturi system lifecycle. It records everything from ingestion entry to exit verdict. It is append-only. Nothing is deleted from Scribe — it is the dataset source.
+Scribe is Venturi's append-only event log for ingestion, retrieval, lifecycle,
+and administrative events. In the HIPAA-ready profile it records minimized
+metadata rather than raw retrieval queries or content. Customers control audit
+retention, exports, review, and any authorized secondary use of audit data.
 
 **Events Recorded:**
 
@@ -299,10 +307,11 @@ Agent returns 1 (yes) or 0 (no).
 In document mode: fires once, verdict applies to all siblings via `parent_id`.  
 This is the only interaction Scribe has with an agent. Everything else is passive recording.
 
-**Dataset Flywheel:**  
-Scribe event log + ejected orbs (90-day expiry) → training dataset for nomic embed sidecar replacement model.  
-The dataset contains: what was ingested, what query retrieved it, whether the retrieval was correct.  
-That is a complete training signal for improving semantic retrieval accuracy over time.  
+**Dataset Flywheel (optional, outside the HIPAA-ready profile):**
+Venturi does not automatically create a training dataset from expired content.
+Any secondary use of sensitive data requires a customer-approved policy,
+separate controls, and appropriate legal authorization. HIPAA-profile audit
+events deliberately omit raw queries and content.
 Tier retention also weighs Scribe verdicts: an orb with enough accumulated
 verdict evidence and a high enough usefulness posterior is exempted from
 cold demotion, even when recency-stale (see section 10). Verdicts do not
@@ -338,7 +347,7 @@ This is how partial chains are detected and cleaned.
 
 ---
 
-### 10. Shelf Lifecycle (90-Day Expiry + Tier System)
+### 10. Shelf Lifecycle (Retention + Tier System)
 
 **Tier System:**  
 Driven by recency (`last_accessed`): hot within `TIER_HOT_SECS`, warm within
@@ -355,11 +364,13 @@ This is handled by a background sweep — not synchronous on the retrieval path.
 On retrieval: mark `parent_id` as accessed.  
 Background sweep: find all orbs with that `parent_id`, update `last_accessed`.
 
-**90-Day Expiry:**  
-Background sweep checks `last_accessed` against current date.  
-Orbs older than 90 days without access: ejected.  
-Ejection: orb bytes + Scribe event history written to dataset collection. Librarian row removed. Key removed from exit gate keystore.  
-Nothing is deleted — it moves to the dataset. The dataset is the long-term store for everything that left the shelf.
+**Retention:**
+The customer chooses `VENTURI_RETENTION_DAYS=<positive integer>` or
+`indefinite`. The daily sweep removes expired non-held chains from the shelf,
+catalog, keystore, and graph, and records a content-free retention decision.
+`indefinite` disables expiry. Venturi does not automatically copy ejected
+content into a training dataset; customers must separately authorize and
+govern any secondary use of sensitive data.
 
 ---
 

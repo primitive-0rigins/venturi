@@ -96,6 +96,34 @@ impl Librarian {
         format!("{}:{}", self.embed_model, self.embedding_dim)
     }
 
+    /// Idempotently assign legacy catalog rows to an operator-selected default
+    /// namespace before namespace-scoped access is enabled.
+    pub fn migrate_default_namespace(&self, namespace: &str) -> Result<u32, TunnelError> {
+        if namespace.trim().is_empty() {
+            return Err(TunnelError::GatekeeperRejected {
+                reason: "namespace is required".into(),
+            });
+        }
+        self.conn
+            .execute(
+                "UPDATE orbs SET namespace = ?1 WHERE namespace IS NULL OR namespace = ''",
+                params![namespace],
+            )
+            .map(|changed| changed as u32)
+            .map_err(|e| TunnelError::DatabaseError(e.to_string()))
+    }
+
+    pub fn chain_namespace(&self, parent_id: &str) -> Result<Option<String>, TunnelError> {
+        self.conn
+            .query_row(
+                "SELECT namespace FROM orbs WHERE parent_id = ?1 LIMIT 1",
+                params![parent_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| TunnelError::DatabaseError(e.to_string()))
+    }
+
     /// Register a new orb in the catalog after a successful ingestion commit.
     ///
     /// Embedding is NOT done inline — the orb is enqueued for background processing.
@@ -162,9 +190,9 @@ impl Librarian {
                 "INSERT INTO orbs
              (orb_id, key_id, topic, domain, date, parent_id, sequence, chain_length,
               tier, last_accessed, last_accessed_at, access_count, usefulness_score,
-              pinned, owner_agent_id, embedding, format, classification, content_type, answer_facts,
-              summary_author, summary_model, summary_verified, summary_verified_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'hot',?9,?9,0,1.0,?10,?11,NULL,?12,?13,?14,?15,?16,?17,?18,?19)
+             pinned, owner_agent_id, embedding, format, classification, content_type, answer_facts,
+              summary_author, summary_model, summary_verified, summary_verified_at, namespace)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'hot',?9,?9,0,1.0,?10,?11,NULL,?12,?13,?14,?15,?16,?17,?18,?19,?20)
              ON CONFLICT(orb_id) DO NOTHING",
                 params![
                     entry.orb_id,
@@ -186,6 +214,7 @@ impl Librarian {
                     entry.summary_model,
                     if entry.summary_verified { 1 } else { 0 },
                     entry.summary_verified_at
+                    ,entry.namespace
                 ],
             )
             .map_err(|e| TunnelError::DatabaseError(e.to_string()))?;
@@ -588,6 +617,29 @@ impl Librarian {
         Ok(rrf_fuse(&keyword_ranked, &vector_ranked, top_k))
     }
 
+    pub fn similarity_search_in_namespace(
+        &self,
+        query: &str,
+        top_k: usize,
+        namespace: &str,
+    ) -> Result<Vec<String>, TunnelError> {
+        let candidates = self.similarity_search(query, top_k.saturating_mul(8))?;
+        let mut scoped = Vec::with_capacity(top_k);
+        for orb_id in candidates {
+            let in_namespace: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM orbs WHERE orb_id = ?1 AND namespace = ?2 AND expired_at IS NULL)",
+                params![orb_id, namespace], |row| row.get(0),
+            ).map_err(|e| TunnelError::DatabaseError(e.to_string()))?;
+            if in_namespace {
+                scoped.push(orb_id);
+                if scoped.len() == top_k {
+                    break;
+                }
+            }
+        }
+        Ok(scoped)
+    }
+
     /// Look up a single orb row by its orb_id. Returns None if not catalogued.
     pub fn fetch_by_orb_id(&self, orb_id: &str) -> Result<Option<OrbRow>, TunnelError> {
         let result = self.conn.query_row(
@@ -678,6 +730,34 @@ impl Librarian {
             .map_err(|e| TunnelError::DatabaseError(e.to_string()))
     }
 
+    /// Namespace-scoped structured retrieval. Callers must obtain namespace
+    /// from the authenticated credential, never from an untrusted filter.
+    pub fn fetch_structured_in_namespace(
+        &self,
+        filter: StructuredFilter,
+        namespace: &str,
+    ) -> Result<Vec<OrbRow>, TunnelError> {
+        let (where_clause, mut values) = build_where(&filter);
+        values.push(namespace.to_string());
+        let sql = format!(
+            "SELECT orb_id, key_id, parent_id, sequence, chain_length, tier, format
+             FROM orbs WHERE {} AND namespace = ? AND expired_at IS NULL ORDER BY date ASC, sequence ASC",
+            where_clause
+        );
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| TunnelError::DatabaseError(e.to_string()))?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            values.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let result = stmt
+            .query_map(params.as_slice(), orb_row_from_row)
+            .map_err(|e| TunnelError::DatabaseError(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| TunnelError::DatabaseError(e.to_string()));
+        result
+    }
+
     /// Metadata mode: return catalog rows without triggering decryption.
     /// Same filter API as structured mode but returns richer metadata, no key_id exposed.
     pub fn fetch_metadata(&self, filter: StructuredFilter) -> Result<Vec<MetaRow>, TunnelError> {
@@ -704,6 +784,34 @@ impl Librarian {
 
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| TunnelError::DatabaseError(e.to_string()))
+    }
+
+    pub fn fetch_metadata_in_namespace(
+        &self,
+        filter: StructuredFilter,
+        namespace: &str,
+    ) -> Result<Vec<MetaRow>, TunnelError> {
+        let (where_clause, mut values) = build_where(&filter);
+        values.push(namespace.to_string());
+        let sql = format!(
+            "SELECT orb_id, parent_id, topic, domain, date, format, tier, sequence, chain_length,
+                    classification, content_type, summary_author, summary_model,
+                    summary_verified, summary_verified_at, answer_facts
+             FROM orbs WHERE {} AND namespace = ? AND expired_at IS NULL ORDER BY date ASC, sequence ASC",
+            where_clause
+        );
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| TunnelError::DatabaseError(e.to_string()))?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            values.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let result = stmt
+            .query_map(params.as_slice(), meta_row_from_row)
+            .map_err(|e| TunnelError::DatabaseError(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| TunnelError::DatabaseError(e.to_string()));
+        result
     }
 
     pub fn mark_accessed(&self, parent_id: &str) -> Result<(), TunnelError> {
@@ -1279,8 +1387,8 @@ fn init_schema(conn: &Connection) -> Result<(), TunnelError> {
     init_search_schema(conn)?;
     init_reference_schema(conn)?;
     init_foresight_schema(conn)?;
-    init_indexes(conn)?;
     apply_schema_migrations(conn);
+    init_indexes(conn)?;
     backfill_search_index(conn);
     Ok(())
 }
@@ -1309,6 +1417,7 @@ fn init_orbs_schema(conn: &Connection) -> Result<(), TunnelError> {
             usefulness_beta  REAL NOT NULL DEFAULT 1.0,
             pinned       INTEGER NOT NULL DEFAULT 0,
             owner_agent_id TEXT NOT NULL DEFAULT 'unknown',
+            namespace    TEXT NOT NULL DEFAULT 'default',
             embedding     BLOB,
             format        TEXT NOT NULL DEFAULT 'text',
             classification TEXT NOT NULL DEFAULT 'internal',
@@ -1422,6 +1531,7 @@ fn init_indexes(conn: &Connection) -> Result<(), TunnelError> {
         CREATE INDEX IF NOT EXISTS idx_last_accessed ON orbs(last_accessed);
         CREATE INDEX IF NOT EXISTS idx_last_accessed_at ON orbs(last_accessed_at);
         CREATE INDEX IF NOT EXISTS idx_owner_agent_id ON orbs(owner_agent_id);
+        CREATE INDEX IF NOT EXISTS idx_namespace_parent ON orbs(namespace, parent_id);
         CREATE INDEX IF NOT EXISTS idx_eq_attempts   ON embedding_queue(attempts);
         CREATE INDEX IF NOT EXISTS idx_fq_attempts   ON fact_queue(attempts);
         CREATE INDEX IF NOT EXISTS idx_cr_from       ON chain_references(from_parent_id);
@@ -1450,6 +1560,8 @@ fn apply_schema_migrations(conn: &Connection) {
     let _ = conn
         .execute_batch("ALTER TABLE orbs ADD COLUMN summary_verified INTEGER NOT NULL DEFAULT 0");
     let _ = conn.execute_batch("ALTER TABLE orbs ADD COLUMN summary_verified_at TEXT");
+    let _ =
+        conn.execute_batch("ALTER TABLE orbs ADD COLUMN namespace TEXT NOT NULL DEFAULT 'default'");
     let _ = conn.execute_batch("ALTER TABLE orbs ADD COLUMN last_accessed_at TEXT");
     let _ =
         conn.execute_batch("ALTER TABLE orbs ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0");
@@ -1890,6 +2002,7 @@ pub struct OrbEntry {
     pub content_type: String,
     pub pinned: bool,
     pub owner_agent_id: String,
+    pub namespace: String,
     pub summary: String,
     /// Optional atomic verifiable facts derived from the content.
     /// Each string is one independently-verifiable statement.
@@ -1984,6 +2097,7 @@ mod tests {
             content_type: "document".to_string(),
             pinned: false,
             owner_agent_id: "agent-1".to_string(),
+            namespace: "default".to_string(),
             summary: "replay-safe summary".to_string(),
             answer_facts: Vec::new(),
             summary_author: "agent-1".to_string(),
@@ -2040,6 +2154,31 @@ mod tests {
         assert_eq!(access_count, 7);
         assert_eq!(usefulness_score, 0.8);
         assert_eq!(fts_rows, 1);
+    }
+
+    #[test]
+    fn metadata_namespace_filter_does_not_return_other_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib = Librarian::open(
+            dir.path().join("catalog.db").to_str().unwrap(),
+            "http://localhost",
+            None,
+            None,
+        )
+        .unwrap();
+        let mut clinical = test_orb_entry();
+        clinical.namespace = "clinical".into();
+        lib.register_orb(clinical).unwrap();
+        let mut billing = test_orb_entry();
+        billing.orb_id = "orb-2".into();
+        billing.parent_id = "parent-2".into();
+        billing.namespace = "billing".into();
+        lib.register_orb(billing).unwrap();
+        let rows = lib
+            .fetch_metadata_in_namespace(StructuredFilter::default(), "clinical")
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].parent_id, "parent-1");
     }
 
     #[test]

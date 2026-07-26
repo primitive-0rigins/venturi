@@ -11,6 +11,79 @@ use worker::WorkerError;
 
 #[tokio::main]
 async fn main() {
+    if let Err(error) = venturi::auth::validate_hipaa_environment() {
+        eprintln!("{error}");
+        std::process::exit(2);
+    }
+    let data_dir = env::var("VENTURI_DATA").unwrap_or_else(|_| {
+        format!(
+            "{}/venturi-data",
+            env::var("HOME").unwrap_or_else(|_| "/tmp".into())
+        )
+    });
+
+    let mut args = env::args().skip(1);
+    if let Some(command) = args.next() {
+        match command.as_str() {
+            "migrate-namespace" => {
+                let Some(namespace) = args.next() else {
+                    eprintln!("usage: venturi migrate-namespace <namespace>");
+                    std::process::exit(2);
+                };
+                if args.next().is_some() {
+                    eprintln!("usage: venturi migrate-namespace <namespace>");
+                    std::process::exit(2);
+                }
+                match open_venturi(&data_dir).migrate_default_namespace(&namespace) {
+                    Ok(changed) => {
+                        println!(
+                            "assigned {changed} legacy catalog rows to namespace `{namespace}`"
+                        )
+                    }
+                    Err(error) => {
+                        eprintln!("namespace migration failed: {error}");
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
+            "export-audit" => {
+                if args.next().is_some() {
+                    eprintln!("usage: venturi export-audit > audit.jsonl");
+                    std::process::exit(2);
+                }
+                let key = match venturi::auth::audit_signing_key() {
+                    Ok(key) => key,
+                    Err(error) => {
+                        eprintln!("audit export failed: {error}");
+                        std::process::exit(2);
+                    }
+                };
+                match open_venturi(&data_dir).export_audit_jsonl(&key) {
+                    Ok(export) => {
+                        print!("{}", export.jsonl);
+                        eprintln!(
+                            "format={} final_hash={} public_key={} signature={}",
+                            export.format,
+                            export.final_hash,
+                            export.public_key_hex,
+                            export.signature_hex
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!("audit export failed: {error}");
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
+            _ => {
+                eprintln!("unknown command `{command}`; usage: venturi migrate-namespace <namespace> | venturi export-audit > audit.jsonl");
+                std::process::exit(2);
+            }
+        }
+    }
+
     if env::var("VENTURI_ADMIN_KEY")
         .map(|key| key.trim().is_empty())
         .unwrap_or(true)
@@ -22,13 +95,6 @@ async fn main() {
         .ok()
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(9271);
-
-    let data_dir = env::var("VENTURI_DATA").unwrap_or_else(|_| {
-        format!(
-            "{}/venturi-data",
-            env::var("HOME").unwrap_or_else(|_| "/tmp".into())
-        )
-    });
 
     let venturi = open_venturi(&data_dir);
     let shared: SharedVenturi = worker::spawn_worker(venturi);

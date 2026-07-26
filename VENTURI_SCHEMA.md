@@ -66,7 +66,9 @@ CREATE INDEX idx_kg_edges_to ON kg_edges(to_node_id);
 CREATE INDEX idx_kg_refs_parent ON kg_node_refs(parent_id);
 ```
 
-**On 90-day expiry:** When a chain ejects, delete all `kg_node_refs` rows for that `parent_id`. Delete all `kg_edges` rows for that `parent_id`. Delete any `kg_nodes` that have zero remaining refs.
+**On retention deletion:** When a non-held chain reaches the configured
+retention period, delete all `kg_node_refs` rows for that `parent_id`, delete
+its `kg_edges`, and delete any `kg_nodes` with no remaining references.
 
 ---
 

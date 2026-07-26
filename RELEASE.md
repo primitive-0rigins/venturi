@@ -32,3 +32,16 @@ restore verification in [BACKUP_RESTORE.md](BACKUP_RESTORE.md).
 This checkout has no configured Git remote, so pushing, configuring repository
 settings, creating a hosted release, and publishing a tag require the release
 owner to perform them.
+# Regulated deployment release procedure
+
+For a HIPAA-ready deployment, release owners must record the source commit,
+Rust/Phoenix test results, dependency/license/vulnerability review, and a
+signed release archive. Generate a CycloneDX SBOM with:
+
+```bash
+./scripts/generate-sbom.sh
+```
+
+Sign the SBOM and artifacts with the organization's approved signing key and
+publish verification instructions and checksums. A release without those
+records is not approved for a regulated deployment.

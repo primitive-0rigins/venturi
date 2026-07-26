@@ -23,5 +23,7 @@ these components can make content unrecoverable or unindexed.
 4. Inspect startup logs for recovery or reconciliation messages before using
    the restored instance for writes.
 
-There is no schema migration or key-rotation tool. Test this procedure against
-a non-production backup before relying on it for recovery.
+Use `venturi migrate-namespace <namespace>` only after a tested backup when
+migrating legacy catalog rows to the namespace model. There is no key-rotation
+tool. Test this procedure against a non-production backup before relying on it
+for recovery.

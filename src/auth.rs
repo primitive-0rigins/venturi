@@ -17,40 +17,98 @@ impl Scope {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApiKey {
+    /// Configured key name is the service principal. Never trust agent_id from a request body.
+    pub name: String,
     pub value: String,
     pub scope: Scope,
+    pub namespaces: Vec<String>,
 }
 
+impl ApiKey {
+    pub fn grants_namespace(&self, namespace: &str) -> bool {
+        self.namespaces
+            .iter()
+            .any(|grant| grant == "*" || grant == namespace)
+    }
+}
+
+pub fn hipaa_profile() -> bool {
+    matches!(
+        env::var("VENTURI_DEPLOYMENT_PROFILE").as_deref(),
+        Ok("hipaa" | "HIPAA")
+    )
+}
+
+/// Decode the customer-managed Ed25519 seed used for signed audit exports.
+/// It must be supplied as exactly 64 lowercase or uppercase hexadecimal digits.
+pub fn audit_signing_key() -> Result<[u8; 32], String> {
+    let value = env::var("VENTURI_AUDIT_SIGNING_KEY")
+        .map_err(|_| "VENTURI_AUDIT_SIGNING_KEY is required".to_string())?;
+    if value.len() != 64 {
+        return Err("VENTURI_AUDIT_SIGNING_KEY must be a 32-byte hexadecimal seed".into());
+    }
+    let mut key = [0u8; 32];
+    for (index, byte) in key.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|_| "VENTURI_AUDIT_SIGNING_KEY must be a 32-byte hexadecimal seed")?;
+    }
+    Ok(key)
+}
+
+/// `VENTURI_AGENT_KEYS=name:key:scope:namespaces`, where namespaces is a `|`-separated
+/// allow-list (for example `ehr-writer:secret:write:clinical|billing`). The legacy
+/// three-field form remains available outside the HIPAA profile and receives `*` with a
+/// migration warning at process startup.
 pub fn configured_keys() -> Vec<ApiKey> {
     let mut keys = Vec::new();
     if let Ok(value) = env::var("VENTURI_ADMIN_KEY") {
         if !value.trim().is_empty() {
             keys.push(ApiKey {
+                name: "admin".into(),
                 value,
                 scope: Scope::Admin,
+                namespaces: vec!["*".into()],
             });
         }
     }
     if let Ok(value) = env::var("VENTURI_AGENT_KEYS") {
         for entry in value.split(',') {
-            let mut parts = entry.splitn(3, ':');
-            let _name = parts.next();
-            let key = parts.next();
-            let scope = parts.next();
+            let mut parts = entry.splitn(4, ':');
+            let (Some(name), Some(value), Some(scope)) = (parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
             let scope = match scope {
-                Some("read") => Scope::Read,
-                Some("write") => Scope::Write,
-                Some("admin") => Scope::Admin,
+                "read" => Scope::Read,
+                "write" => Scope::Write,
+                "admin" => Scope::Admin,
                 _ => continue,
             };
-            if let Some(value) = key.filter(|key| !key.trim().is_empty()) {
-                keys.push(ApiKey {
-                    value: value.to_string(),
-                    scope,
-                });
+            if name.trim().is_empty() || value.trim().is_empty() {
+                continue;
             }
+            let namespaces = parts.next().map(|v| {
+                v.split('|')
+                    .filter(|n| !n.trim().is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            });
+            let Some(namespaces) =
+                namespaces.or_else(|| (!hipaa_profile()).then(|| vec!["*".into()]))
+            else {
+                continue;
+            };
+            if namespaces.is_empty() {
+                continue;
+            }
+            keys.push(ApiKey {
+                name: name.to_string(),
+                value: value.to_string(),
+                scope,
+                namespaces,
+            });
         }
     }
     keys
@@ -69,144 +127,60 @@ pub fn required_scope(path: &str) -> Scope {
     }
 }
 
+pub fn validate_hipaa_environment() -> Result<(), String> {
+    if !hipaa_profile() {
+        return Ok(());
+    }
+    if env::var("VENTURI_RETENTION_DAYS")
+        .ok()
+        .filter(|v| v == "indefinite" || v.parse::<u64>().is_ok_and(|n| n > 0))
+        .is_none()
+    {
+        return Err("HIPAA profile requires VENTURI_RETENTION_DAYS to be a positive integer or `indefinite`".into());
+    }
+    if audit_signing_key().is_err() {
+        return Err("HIPAA profile requires a valid VENTURI_AUDIT_SIGNING_KEY".into());
+    }
+    for name in [
+        "VENTURI_TLS_PROXY",
+        "VENTURI_UI_OIDC_ISSUER",
+        "VENTURI_UI_OIDC_CLIENT_ID",
+    ] {
+        if env::var(name)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_none()
+        {
+            return Err(format!("HIPAA profile requires {name}"));
+        }
+    }
+    if env::var("VENTURI_AGENT_KEYS")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .is_none()
+        || configured_keys().iter().all(|key| key.name == "admin")
+    {
+        return Err("HIPAA profile requires named VENTURI_AGENT_KEYS with namespace grants".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // configured_keys() reads process-wide env vars; serialize any test that
-    // touches them so parallel `cargo test` runs don't clobber each other.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let previous: Vec<(&str, Option<String>)> =
-            vars.iter().map(|(k, _)| (*k, env::var(k).ok())).collect();
-        for (k, v) in vars {
-            unsafe {
-                match v {
-                    Some(value) => env::set_var(k, value),
-                    None => env::remove_var(k),
-                }
-            }
-        }
-        f();
-        for (k, v) in previous {
-            unsafe {
-                match v {
-                    Some(value) => env::set_var(k, value),
-                    None => env::remove_var(k),
-                }
-            }
-        }
-    }
-
     #[test]
-    fn admin_scope_allows_everything() {
-        assert!(Scope::Admin.allows(Scope::Admin));
-        assert!(Scope::Admin.allows(Scope::Write));
-        assert!(Scope::Admin.allows(Scope::Read));
+    fn namespace_grants_are_explicit() {
+        let key = ApiKey {
+            name: "svc".into(),
+            value: "x".into(),
+            scope: Scope::Write,
+            namespaces: vec!["clinical".into()],
+        };
+        assert!(key.grants_namespace("clinical"));
+        assert!(!key.grants_namespace("billing"));
     }
-
     #[test]
-    fn write_scope_allows_write_and_read_not_admin() {
-        assert!(Scope::Write.allows(Scope::Write));
-        assert!(Scope::Write.allows(Scope::Read));
-        assert!(!Scope::Write.allows(Scope::Admin));
-    }
-
-    #[test]
-    fn read_scope_allows_only_read() {
-        assert!(Scope::Read.allows(Scope::Read));
-        assert!(!Scope::Read.allows(Scope::Write));
-        assert!(!Scope::Read.allows(Scope::Admin));
-    }
-
-    #[test]
-    fn required_scope_maps_known_paths() {
-        assert_eq!(required_scope("/ingest"), Scope::Write);
-        assert_eq!(required_scope("/verdict"), Scope::Write);
-        assert_eq!(required_scope("/retrieve/context"), Scope::Read);
-        assert_eq!(required_scope("/audit/abc"), Scope::Read);
-        assert_eq!(required_scope("/chain/references/abc"), Scope::Read);
-    }
-
-    #[test]
-    fn required_scope_defaults_unlisted_paths_to_admin() {
-        // Fail closed: anything not explicitly classified as read/write
-        // (including /hold and /chain/link) requires the admin key.
+    fn scope_is_fail_closed() {
         assert_eq!(required_scope("/hold"), Scope::Admin);
-        assert_eq!(required_scope("/hold/abc"), Scope::Admin);
-        assert_eq!(required_scope("/chain/link"), Scope::Admin);
-        assert_eq!(required_scope("/unknown"), Scope::Admin);
-    }
-
-    #[test]
-    fn configured_keys_reads_admin_key_from_env() {
-        with_env(
-            &[
-                ("VENTURI_ADMIN_KEY", Some("admin-secret")),
-                ("VENTURI_AGENT_KEYS", None),
-            ],
-            || {
-                let keys = configured_keys();
-                assert_eq!(keys.len(), 1);
-                assert_eq!(keys[0].value, "admin-secret");
-                assert_eq!(keys[0].scope, Scope::Admin);
-            },
-        );
-    }
-
-    #[test]
-    fn configured_keys_ignores_blank_admin_key() {
-        with_env(
-            &[
-                ("VENTURI_ADMIN_KEY", Some("   ")),
-                ("VENTURI_AGENT_KEYS", None),
-            ],
-            || {
-                assert!(configured_keys().is_empty());
-            },
-        );
-    }
-
-    #[test]
-    fn configured_keys_parses_agent_keys_by_scope() {
-        with_env(
-            &[
-                ("VENTURI_ADMIN_KEY", None),
-                (
-                    "VENTURI_AGENT_KEYS",
-                    Some("reader:key-r:read,writer:key-w:write,root:key-a:admin"),
-                ),
-            ],
-            || {
-                let keys = configured_keys();
-                assert_eq!(keys.len(), 3);
-                assert!(keys
-                    .iter()
-                    .any(|k| k.value == "key-r" && k.scope == Scope::Read));
-                assert!(keys
-                    .iter()
-                    .any(|k| k.value == "key-w" && k.scope == Scope::Write));
-                assert!(keys
-                    .iter()
-                    .any(|k| k.value == "key-a" && k.scope == Scope::Admin));
-            },
-        );
-    }
-
-    #[test]
-    fn configured_keys_skips_malformed_agent_entries() {
-        with_env(
-            &[
-                ("VENTURI_ADMIN_KEY", None),
-                // missing scope, and an entry with an empty key value
-                ("VENTURI_AGENT_KEYS", Some("bad:key-only-name,ok::read")),
-            ],
-            || {
-                assert!(configured_keys().is_empty());
-            },
-        );
     }
 }

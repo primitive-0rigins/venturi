@@ -95,7 +95,8 @@ The only agent interaction is the exit verdict: after retrieval, the exit gate p
    - Sibling refresh sweep: every 5 minutes, process any `parent_id` access marks
    - Tier update sweep: every 15 minutes, recency-based tier changes, plus a
      verdict-fed exemption from cold demotion (see below)
-   - 90-day expiry sweep: once daily, find expired orbs, eject to dataset, remove from Librarian + keystore
+   - Retention sweep: once daily, applies the customer-selected retention
+     policy; `indefinite` disables expiry and legal holds preserve chains
    - Lifecycle manager sweep: every 60 seconds, fast in-memory hot/warm/cold
      RAM eviction scoped per actor (see below)
    - Spectral community detection sweep: every 30 minutes, clusters the
@@ -117,15 +118,14 @@ for each parent_id:
     delete from access_marks where parent_id = ?
 ```
 
-### 90-Day Expiry Sweep
+### Retention Sweep
 ```
-find all orbs WHERE last_accessed < (now - 90 days)
-for each orb:
-    read orb bytes from OrbShelf
-    write orb + Scribe history to dataset collection
-    DELETE from orbs WHERE orb_id = ?
-    DELETE from keystore WHERE parent_id = ? (only if last orb in chain)
-    delete orb file from disk
+if retention is indefinite: no expiry action
+otherwise find chains WHERE last_accessed < (now - configured retention days)
+for each chain:
+    preserve it if a legal hold is active and record that decision
+    otherwise delete catalog rows, sealed-orb files, the chain key, and graph references
+    record the content-free retention decision in Scribe
 ```
 
 ### Tier Update Sweep

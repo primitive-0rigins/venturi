@@ -8,6 +8,7 @@ defmodule VenturiUiWeb.Endpoint do
     store: :cookie,
     key: "_venturi_ui_key",
     signing_salt: "rjfBrLgH",
+    encryption_salt: "oY2eJ5G8bQ3nV7kP",
     same_site: "Lax"
   ]
 

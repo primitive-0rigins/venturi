@@ -4,6 +4,11 @@
 **Philosophy:** Accuracy over speed. Regulated industries (healthcare, legal, finance) need correct
 retrieval more than fast retrieval. Speed is optimized after correctness is proven.
 
+> Portfolio note: this is a planning document. Only items marked `COMPLETED`
+> and corroborated by the current code and tests should be treated as shipped.
+> It is not a compliance attestation, product commitment, or substitute for
+> the deployment limitations in [HIPAA_READINESS.md](HIPAA_READINESS.md).
+
 ---
 
 ## How to read this
