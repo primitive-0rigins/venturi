@@ -13,8 +13,8 @@ the release before publishing details.
 
 ## Supported versions
 
-Only the latest release on the default branch receives security fixes before a
-formal support policy is published.
+The latest tagged release receives security fixes. Until the first release is
+tagged, security fixes target the current `master` branch.
 
 ## Deployment note
 

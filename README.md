@@ -6,8 +6,9 @@ SQLite, and rehydrates the original bytes on retrieval.
 
 ## Run locally
 
-Venturi requires a local Ollama-compatible embedding service and an
-administrator API key. By default it
+Venturi requires an administrator API key. A local Ollama-compatible embedding
+service enables semantic retrieval and graph extraction; keyword and metadata
+retrieval remain available when it is unavailable. By default Venturi
 uses `http://localhost:11434`, stores state in `~/venturi-data`, and listens
 only on `127.0.0.1:9271`.
 
@@ -24,14 +25,17 @@ Optional environment variables:
 - `VENTURI_EMBEDDING_MODEL` and `VENTURI_EMBEDDING_DIM` — embedding settings.
 - `VENTURI_ADMIN_KEY` — required administrator key. Venturi refuses to start
   without it.
+- `VENTURI_AGENT_KEYS` — optional comma-separated `name:key:scope` entries;
+  `scope` is `read`, `write`, or `admin`.
 
 ## Security boundary
 
 Venturi encrypts stored content, keeps its HTTP server bound to localhost, and
 requires a Bearer API key for every memory operation. An administrator key is
-required at startup; it can issue scoped agent keys for read, write, or full
-administrative access. Keep keys and the data directory private. If you expose
-Venturi beyond the local machine, put it behind TLS and a network boundary.
+required at startup; optional scoped agent keys are configured with
+`VENTURI_AGENT_KEYS` for read, write, or full administrative access. Keep keys
+and the data directory private. If you expose Venturi beyond the local machine,
+put it behind TLS and a network boundary.
 
 ## Operator dashboard
 
@@ -57,10 +61,14 @@ For a production dashboard, set `SECRET_KEY_BASE`,
 cargo fmt --check
 cargo test --locked
 cargo clippy --all-targets --locked -- -D warnings
+cargo deny check advisories licenses
 ```
 
-See [DEPLOYMENT.md](DEPLOYMENT.md) for production operation and recovery, and
-[SECURITY.md](SECURITY.md) for vulnerability reporting.
+See [DEPLOYMENT.md](DEPLOYMENT.md), [BACKUP_RESTORE.md](BACKUP_RESTORE.md),
+and [RELEASE.md](RELEASE.md) for operations, recovery, and releases.
+[SECURITY.md](SECURITY.md) covers vulnerability reporting; supported versions
+and security boundaries are in [SUPPORT.md](SUPPORT.md) and
+[THREAT_MODEL.md](THREAT_MODEL.md).
 
 ## Contributing
 

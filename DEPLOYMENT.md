@@ -29,9 +29,11 @@ export VENTURI_OLLAMA=http://127.0.0.1:11434
 cargo run --release
 ```
 
-Use scoped agent keys only where needed. Key rotation and migration tooling are
-not yet provided; plan a maintenance window and tested backup/restore process
-before changing credentials or storage paths.
+Configure scoped agent keys only where needed. `VENTURI_AGENT_KEYS` accepts
+comma-separated `name:key:scope` entries, where `scope` is `read`, `write`, or
+`admin`. Key rotation and migration tooling are not yet provided; plan a
+maintenance window and tested backup/restore process before changing credentials
+or storage paths.
 
 ## Operator dashboard
 
