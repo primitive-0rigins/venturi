@@ -1110,7 +1110,6 @@ Items in this roadmap were derived from:
 |---|---|---|---|
 | EnterpriseRAG-Bench | 2026-05-29 | MIT | Question taxonomy → benchmark suite; answer_facts → summary atoms; document_recall → orb recall metric; info_not_found → MemoryNotFound |
 | HypergraphPartitioning | 2026-05-29 | BSD 3-Clause | Overlay concept → consensus retrieval; hyperedge model → graph ingestion; spectral Laplacian → community detection |
-| Design notes | 2026-05-29 | Private design notes | Owner worker, failure taxonomy, retrieval proofs, legal hold, backpressure |
 | hollow-agentOS | 2026-05-29 | MIT | Cross-chain lineage → B6 reference edges; L5 fact-check → B7 claim verification; checkpoint/replay → B8 consistency scoring |
 | EverOS | 2026-05-29 | Apache 2.0 | Foresight memory type → B9; BM25/RRF concept → part of B10 |
 | CocoIndex | 2026-05-29 | Apache 2.0 | sqlite-vec disk-backed vector index → B10 (replaces in-memory HashMap, combined with BM25+RRF) |

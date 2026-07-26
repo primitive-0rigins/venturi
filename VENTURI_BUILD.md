@@ -1,6 +1,6 @@
 # VENTURI — Build Specification
 **Version:** 1.0  
-**Status:** Ready to Build  
+**Status:** Implementation reference
 **Classification:** Public
 
 ---
@@ -11,13 +11,15 @@ Venturi is encrypted, governed, lossless memory infrastructure for autonomous ag
 
 Standard RAG was built for developers who want fast retrieval. It makes the right tradeoffs for that market: chunk the content, embed the chunks, search by similarity, inject into a prompt. Those tradeoffs — lossy chunking, plaintext storage, no audit trail, no ingestion governance — disqualify standard RAG from hospitals, security firms, and government agencies. Those organizations will deploy AI agents. They will need memory infrastructure. Their requirements are not optional:
 
-- **HIPAA, FedRAMP, SOC 2** require encrypted storage with key custody separation
+- Regulated deployments need controls beyond encryption, including access
+  management, operational procedures, and independent compliance assessment
 - **Compliance audits and incident response** require a full end-to-end audit trail of who put what in, when, and whether it was retrieved correctly
 - **Legal and medical documents** cannot be approximated — the dropped chunk may be the critical sentence
 - **Classified and patient data** cannot leave the building — cloud RAG is disqualified by law
 - **Regulated ingestion** requires chain of custody — who ingested what, when, under what identity
 
-Venturi is built for that market. The complexity that makes it harder to build than LightRAG or ragflow is the same complexity that makes it the only option when the above requirements are non-negotiable.
+Venturi is designed for deployments that need these controls. It is not, by
+itself, a HIPAA, FedRAMP, or SOC 2 certification.
 
 **What Venturi is not:**
 - Not a general-purpose developer RAG tool
@@ -141,8 +143,10 @@ Hot and warm tiers: embedding cached in Librarian row.
 Cold tier: row exists, embedding column is null. Re-embedded on demand at retrieval time (slower, acceptable).  
 The Librarian embedding is the query surface — no other component handles search.
 
-**HNSW Index:**  
-The Librarian maintains an in-memory HNSW (hierarchical navigable small world) index over all hot/warm embeddings. This is how similarity search is fast — it does not scan every row. On startup, Venturi builds this index from the embedding column in the Librarian. The index is rebuilt on startup, not persisted separately. Cold-tier orbs are not in the index until promoted.
+**Search index:**
+The Librarian stores embeddings in SQLite and combines optional `sqlite-vec`
+search with FTS5 keyword search. If the vector extension is not configured,
+keyword retrieval remains available while semantic retrieval degrades.
 
 **The Librarian never holds raw keys.** Only `key_id` pointer.
 
@@ -234,7 +238,7 @@ mode:   context | document | graph | temporal | structured
 **Document Mode Flow:**
 1. Query → nomic embed → similarity search in Librarian → highest-ranked matching orb. Its `parent_id` determines the document returned. Other matches from the search are discarded.
 2. Pull `parent_id` → fetch all sibling rows from Librarian (full chain)
-3. Exit gates: **parallel unlock** all chain members simultaneously using chain key
+3. Exit gates: unlock each chain member using the chain key
 4. Decompress all orbs
 5. Unwrap all orbs
 6. Assemble in `sequence` order
@@ -430,7 +434,7 @@ Agent: query + mode=document
         ↓
 Librarian: nomic embed similarity search → one matching orb → pull all siblings by parent_id
         ↓
-Exit Gate 1: parallel unlock all chain members (one key, all orbs simultaneously)
+Exit Gate 1: unlock chain members using the chain key
         ↓
 Exit Gate 2: decompress all (parallel)
         ↓

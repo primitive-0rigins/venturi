@@ -54,8 +54,18 @@ For a production dashboard, set `SECRET_KEY_BASE`,
 ## Verify
 
 ```bash
-cargo test
+cargo fmt --check
+cargo test --locked
+cargo clippy --all-targets --locked -- -D warnings
 ```
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for production operation and recovery, and
+[SECURITY.md](SECURITY.md) for vulnerability reporting.
+
+## Contributing
+
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) and follow the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
