@@ -40,7 +40,7 @@ jobs:
         with:
           otp-version: "27"
           elixir-version: "1.18.2"
-      - run: mix deps.get --only test
+      - run: mix deps.get
       - run: mix format --check-formatted
       - run: mix test
       - run: MIX_ENV=prod mix assets.deploy
