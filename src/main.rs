@@ -48,13 +48,17 @@ async fn main() {
 
 fn open_venturi(data_dir: &str) -> Venturi {
     let keys_dir = format!("{}/keys", data_dir);
+    let shelf_dir = format!("{}/shelf", data_dir);
     std::fs::create_dir_all(&keys_dir).expect("failed to create keys dir");
-    std::fs::create_dir_all(format!("{}/shelf", data_dir)).expect("failed to create shelf dir");
+    std::fs::create_dir_all(&shelf_dir).expect("failed to create shelf dir");
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&keys_dir, std::fs::Permissions::from_mode(0o700));
+        for path in [data_dir, &keys_dir, &shelf_dir] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                .expect("failed to restrict Venturi data directory");
+        }
     }
 
     let ollama_url = env::var("VENTURI_OLLAMA").unwrap_or_else(|_| "http://localhost:11434".into());

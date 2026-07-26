@@ -1,3 +1,4 @@
+use crate::storage::permissions::restrict_database_files;
 use crate::types::error::TunnelError;
 use rusqlite::{params, Connection};
 
@@ -51,6 +52,7 @@ impl Journal {
         let _ = conn.execute_batch(
             "ALTER TABLE ingestions ADD COLUMN catalog_registered INTEGER NOT NULL DEFAULT 0",
         );
+        restrict_database_files(path)?;
 
         Ok(Self { conn })
     }

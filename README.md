@@ -38,12 +38,18 @@ Venturi beyond the local machine, put it behind TLS and a network boundary.
 `ui/` is a standalone Elixir/Phoenix app that gives an operator a read/light-write
 console over the API: health, retrieval audit lookup, chain references, and
 legal hold. It talks to Venturi over HTTP and adds no new backend endpoints.
+In production it binds only to localhost, requires HTTP Basic authentication,
+and expects a TLS-terminating reverse proxy.
 
 ```bash
 cd ui
 mix deps.get
 VENTURI_API_URL="http://127.0.0.1:9271" VENTURI_API_KEY="$VENTURI_ADMIN_KEY" mix phx.server
 ```
+
+For a production dashboard, set `SECRET_KEY_BASE`,
+`VENTURI_UI_OPERATOR_PASSWORD`, and (optionally)
+`VENTURI_UI_OPERATOR_USERNAME`; expose it only through a TLS reverse proxy.
 
 ## Verify
 

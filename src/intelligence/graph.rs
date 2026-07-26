@@ -1,5 +1,6 @@
 use crate::intelligence::community::CommunityDetector;
 use crate::pipeline::sweep::SweepReport;
+use crate::storage::permissions::restrict_database_files;
 use crate::types::error::TunnelError;
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
@@ -72,6 +73,7 @@ impl KnowledgeGraph {
         // Migration: community_id added by R1 spectral community detection.
         // SQLite has no `ADD COLUMN IF NOT EXISTS`; ignore the error on repeat opens.
         let _ = conn.execute_batch("ALTER TABLE kg_nodes ADD COLUMN community_id TEXT");
+        restrict_database_files(db_path)?;
 
         Ok(Self {
             conn,

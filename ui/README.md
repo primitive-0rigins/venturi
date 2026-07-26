@@ -6,6 +6,8 @@ viewing/linking, and legal hold placement/release. Every page is a thin view
 over routes that already exist on the Venturi API — this app adds no new
 backend surface.
 
+Requires Elixir 1.15 or later.
+
 ## Run locally
 
 Venturi itself must be running first (see the root README). Then:
@@ -29,3 +31,10 @@ Environment variables:
 ```bash
 mix test
 ```
+
+## Production
+
+The dashboard binds to `127.0.0.1` in production and requires HTTP Basic
+authentication. Set `SECRET_KEY_BASE` and `VENTURI_UI_OPERATOR_PASSWORD`
+(optionally `VENTURI_UI_OPERATOR_USERNAME`), then place a TLS-terminating
+reverse proxy in front of it. Do not expose the dashboard port directly.

@@ -1,4 +1,5 @@
 use crate::intelligence::scribe::ExitEvent;
+use crate::storage::permissions::restrict_database_files;
 use crate::types::error::TunnelError;
 use crate::types::fact::{AnswerFact, Foresight};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -79,6 +80,7 @@ impl Librarian {
         if sqlite_vec_loaded {
             backfill_sqlite_vec_index(&conn);
         }
+        restrict_database_files(db_path)?;
         Ok(Self {
             conn,
             embedding_index_loaded: sqlite_vec_loaded,

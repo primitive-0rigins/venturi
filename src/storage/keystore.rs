@@ -1,3 +1,4 @@
+use crate::storage::permissions::restrict_database_files;
 use crate::types::error::TunnelError;
 use rusqlite::{params, Connection};
 
@@ -35,23 +36,7 @@ impl Keystore {
         )
         .map_err(|e| TunnelError::DatabaseError(e.to_string()))?;
 
-        // The parent directory being chmod 700 is not enough on its own — this
-        // is the one file in the whole system holding every raw encryption
-        // key, so it gets its own owner-only permissions too (defense in
-        // depth, and it's what the doc comment above already claimed).
-        // WAL mode also creates -wal/-shm sidecar files alongside it.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            for candidate in [
-                path.to_string(),
-                format!("{path}-wal"),
-                format!("{path}-shm"),
-            ] {
-                let _ = std::fs::set_permissions(&candidate, perms.clone());
-            }
-        }
+        restrict_database_files(path)?;
 
         Ok(Self { conn })
     }

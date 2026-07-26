@@ -8,6 +8,17 @@ defmodule VenturiUiWeb.Router do
     plug :put_root_layout, html: {VenturiUiWeb.Layouts, :root}
     plug :protect_from_forgery
     plug :put_secure_browser_headers
+    plug :require_operator
+  end
+
+  defp require_operator(conn, _opts) do
+    case Application.fetch_env!(:venturi_ui, :operator_auth) do
+      [username: username, password: password] ->
+        Plug.BasicAuth.basic_auth(conn, username: username, password: password, realm: "Venturi")
+
+      _ ->
+        conn
+    end
   end
 
   pipeline :api do

@@ -1,3 +1,4 @@
+use crate::storage::permissions::restrict_database_files;
 use crate::types::error::TunnelError;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,7 @@ impl Scribe {
         ",
         )
         .map_err(|e| TunnelError::DatabaseError(e.to_string()))?;
+        restrict_database_files(path)?;
 
         Ok(Self { conn })
     }

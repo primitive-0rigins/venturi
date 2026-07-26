@@ -1086,6 +1086,47 @@ fn secret_foresights_are_not_returned_broadly() {
     assert!(v.foresights("2026-06-10").unwrap().is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn storage_files_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let cfg = test_config(&dir);
+    let paths = [
+        cfg.journal_db.clone(),
+        cfg.keystore_db.clone(),
+        cfg.librarian_db.clone(),
+        cfg.scribe_db.clone(),
+        cfg.graph_db.clone(),
+    ];
+    let shelf_root = cfg.shelf_root.clone();
+    let mut v = Venturi::open(cfg).unwrap();
+    let result = v
+        .ingest(test_request(
+            "private metadata",
+            vec![b"private content".to_vec()],
+        ))
+        .unwrap();
+
+    for path in paths {
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o077,
+            0
+        );
+    }
+
+    let orb_id = &result.orb_ids[0];
+    let orb = std::path::Path::new(&shelf_root)
+        .join(&orb_id[0..2])
+        .join(&orb_id[2..4])
+        .join(orb_id);
+    assert_eq!(
+        std::fs::metadata(orb).unwrap().permissions().mode() & 0o077,
+        0
+    );
+}
+
 /// record_verdict with expected_orb_ids computes recall correctly.
 #[test]
 fn verdict_recall_computes() {

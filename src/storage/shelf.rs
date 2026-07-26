@@ -24,10 +24,13 @@ impl OrbShelf {
     pub fn store(&self, orb: &Orb) -> Result<(), TunnelError> {
         let path = self.orb_path(&orb.id);
         std::fs::create_dir_all(path.parent().unwrap())?;
+        restrict_directory(path.parent().unwrap())?;
         let bytes = orb.to_bytes();
         let tmp = path.with_extension("tmp");
         std::fs::write(&tmp, &bytes)?;
+        restrict_file(&tmp)?;
         std::fs::rename(&tmp, &path)?;
+        restrict_file(&path)?;
         Ok(())
     }
 
@@ -72,4 +75,22 @@ impl OrbShelf {
         let hex = id.as_hex();
         self.root.join(&hex[0..2]).join(&hex[2..4]).join(&hex)
     }
+}
+
+fn restrict_directory(path: &Path) -> Result<(), TunnelError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn restrict_file(path: &Path) -> Result<(), TunnelError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }

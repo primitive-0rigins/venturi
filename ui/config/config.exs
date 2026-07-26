@@ -14,6 +14,8 @@ config :venturi_ui, :venturi_api,
   base_url: "http://localhost:8080",
   api_key: nil
 
+config :venturi_ui, :operator_auth, enabled: false
+
 # Configures the endpoint
 config :venturi_ui, VenturiUiWeb.Endpoint,
   url: [host: "localhost"],
