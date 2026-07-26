@@ -13,7 +13,7 @@ following are configured:
 
 - `VENTURI_RETENTION_DAYS` is a positive number of days or `indefinite`.
 - `VENTURI_AUDIT_SIGNING_KEY` is a 32-byte hexadecimal Ed25519 seed held in a
-  root-readable secret file.
+  customer-managed secret.
 - `VENTURI_TLS_PROXY=enabled` declares that the localhost API is behind the
   customer's TLS proxy and network policy.
 - `VENTURI_UI_OIDC_ISSUER` and `VENTURI_UI_OIDC_CLIENT_ID` identify the
