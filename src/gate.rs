@@ -2,7 +2,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::types::error::TunnelError;
@@ -51,7 +51,7 @@ impl CompressionGate {
     /// Returns (sealed_bytes, key). sealed_bytes layout: nonce (12) || ciphertext+tag.
     /// The raw key must be written to the exit gate keystore immediately by the caller.
     pub fn encrypt(&self, data: &[u8]) -> Result<(Vec<u8>, GateKey), TunnelError> {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut key_bytes: GateKey = [0u8; 32];
         rng.fill_bytes(&mut key_bytes);
         let sealed = self.encrypt_with_key(data, &key_bytes)?;
@@ -62,7 +62,7 @@ impl CompressionGate {
     /// Used by Gatekeeper so every orb in a chain shares one custody key while
     /// still receiving an independent random nonce.
     pub fn encrypt_with_key(&self, data: &[u8], key: &GateKey) -> Result<Vec<u8>, TunnelError> {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut nonce_bytes = [0u8; 12];
         rng.fill_bytes(&mut nonce_bytes);
 

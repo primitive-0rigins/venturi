@@ -1,7 +1,7 @@
 use crate::gate::CompressionGate;
 use crate::types::error::TunnelError;
 use crate::types::orb::Orb;
-use rand::RngCore;
+use rand::Rng;
 
 /// The wormhole ingestion pipeline.
 ///
@@ -55,7 +55,7 @@ impl WormholeTunnel {
     /// Generate the single raw key for an ingestion chain.
     pub fn generate_chain_key(&self) -> [u8; 32] {
         let mut key = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut key);
+        rand::rng().fill_bytes(&mut key);
         key
     }
 
