@@ -19,5 +19,5 @@ and HyPE indexing degrade when it is unavailable.
 ## Security support
 
 Security fixes target the latest tagged release; before the first tag, they
-target `master`. Report vulnerabilities as described in
+target `main`. Report vulnerabilities as described in
 [SECURITY.md](SECURITY.md).

@@ -14,7 +14,7 @@ the release before publishing details.
 ## Supported versions
 
 The latest tagged release receives security fixes. Until the first release is
-tagged, security fixes target the current `master` branch.
+tagged, security fixes target the current `main` branch.
 
 ## Deployment note
 
