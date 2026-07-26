@@ -1154,6 +1154,26 @@ fn verdict_recall_computes() {
         .expect("record_verdict with no expected failed");
 }
 
+#[test]
+fn tier_sweep_counts_a_cold_chain_once() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().to_str().unwrap().to_string();
+    let mut v = Venturi::open(test_config(&dir)).unwrap();
+    let result = v
+        .ingest(test_request("cold", vec![b"cold".to_vec()]))
+        .unwrap();
+
+    let conn = rusqlite::Connection::open(format!("{root}/librarian.db")).unwrap();
+    conn.execute(
+        "UPDATE orbs SET last_accessed = '0Z', last_accessed_at = '0Z' WHERE parent_id = ?1",
+        [&result.parent_id],
+    )
+    .unwrap();
+
+    let report = v.sweep_tiers().unwrap();
+    assert_eq!(report.chains_affected, 1);
+}
+
 /// context() returns MemoryNotFound when nothing is indexed.
 /// Since Ollama is not running in tests, similarity_search fails → EmbeddingUnavailable.
 #[test]

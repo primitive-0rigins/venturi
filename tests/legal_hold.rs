@@ -1,6 +1,8 @@
 use rusqlite::{params, Connection};
 use tempfile::TempDir;
-use venturi::{IngestionRequest, OrbId, OrbShelf, StorageLimits, Venturi, VenturiConfig};
+use venturi::{
+    IngestionRequest, OrbId, OrbShelf, StorageLimits, TunnelError, Venturi, VenturiConfig,
+};
 
 fn config(dir: &TempDir) -> VenturiConfig {
     let root = dir.path().to_str().unwrap();
@@ -139,4 +141,20 @@ fn pinned_chain_is_not_deleted_by_expiry_sweep() {
         )
         .unwrap();
     assert!(expired_at.is_none());
+}
+
+#[test]
+fn legal_hold_mutations_reject_unknown_chains() {
+    let dir = TempDir::new().unwrap();
+    let v = Venturi::open(config(&dir)).unwrap();
+
+    for result in [
+        v.set_legal_hold("missing-parent", "reason"),
+        v.release_legal_hold("missing-parent"),
+    ] {
+        assert!(matches!(
+            result,
+            Err(TunnelError::OrbNotFound { id }) if id == "missing-parent"
+        ));
+    }
 }

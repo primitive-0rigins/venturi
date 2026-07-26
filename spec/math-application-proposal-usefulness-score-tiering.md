@@ -82,8 +82,9 @@
   every un-rated orb is maximally useful). `usefulness_score` remains as the
   cached `alpha/(alpha+beta)` posterior mean for cheap reads in the existing
   tiering queries. A new `sweep_checkpoints (name TEXT PRIMARY KEY, last_ts TEXT NOT NULL)`
-  table on the same connection tracks the high-water mark of processed EXIT
-  events, so a restart resumes rather than reprocessing or dropping events.
+table on the same connection tracks the high-water mark of processed EXIT
+events as a timestamp-plus-event-ID cursor, so same-second events are not
+dropped and a restart resumes rather than reprocessing events.
 - Numerical safeguards: verdict is clamped to `{0, 1}` before use (any other
   `u8` value written by a future caller is treated as 0/not-useful rather
   than corrupting the posterior with an out-of-range increment). Orbs

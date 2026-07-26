@@ -43,9 +43,11 @@ if config_env() == :prod do
 
   host = System.get_env("PHX_HOST") || "example.com"
   port = String.to_integer(System.get_env("PORT") || "4000")
+
   operator_password =
     System.get_env("VENTURI_UI_OPERATOR_PASSWORD") ||
       raise "environment variable VENTURI_UI_OPERATOR_PASSWORD is missing."
+
   operator_username = System.get_env("VENTURI_UI_OPERATOR_USERNAME") || "operator"
 
   config :venturi_ui, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")

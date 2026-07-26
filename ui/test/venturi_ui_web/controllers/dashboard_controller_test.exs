@@ -28,7 +28,11 @@ defmodule VenturiUiWeb.DashboardControllerTest do
 
   test "GET / requires operator credentials when configured" do
     previous = Application.get_env(:venturi_ui, :operator_auth)
-    Application.put_env(:venturi_ui, :operator_auth, username: "operator", password: "test-password")
+
+    Application.put_env(:venturi_ui, :operator_auth,
+      username: "operator",
+      password: "test-password"
+    )
 
     on_exit(fn -> Application.put_env(:venturi_ui, :operator_auth, previous) end)
 
@@ -40,7 +44,10 @@ defmodule VenturiUiWeb.DashboardControllerTest do
 
     conn =
       build_conn()
-      |> put_req_header("authorization", Plug.BasicAuth.encode_basic_auth("operator", "test-password"))
+      |> put_req_header(
+        "authorization",
+        Plug.BasicAuth.encode_basic_auth("operator", "test-password")
+      )
       |> get(~p"/")
 
     assert html_response(conn, 200) =~ "Online"

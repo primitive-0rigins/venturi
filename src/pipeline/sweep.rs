@@ -8,15 +8,12 @@ use crate::types::error::TunnelError;
 /// Checkpoint name under which the lifecycle sweep tracks the last EXIT event it has folded
 /// into `usefulness_score`. See `Sweeper::sweep_lifecycle`.
 const USEFULNESS_FEEDBACK_CHECKPOINT: &str = "usefulness_feedback";
-/// `exit_events_since` takes a strict `>` bound, so a fresh checkpoint has to start before any
-/// real event timestamp — Scribe's `now_iso()` timestamps are Unix seconds, always positive.
+/// A fresh checkpoint must sort before every real EXIT event. The Scribe cursor accepts this
+/// legacy timestamp-only value, then upgrades it to a timestamp-plus-event-ID cursor.
 const USEFULNESS_FEEDBACK_EPOCH: &str = "0";
 
-/// Tier boundaries (seconds since last access).
-/// Hot  → within 7 days
-/// Warm → 7 – 30 days
-/// Cold → 30+ days (still accessible, not yet expired)
-const TIER_HOT_SECS: u64 = 7 * 86400;
+/// Cold tier boundary (seconds since last access). Orbs are warm after seven days and cold
+/// after thirty days; the sweep updates only those two non-hot tiers.
 const TIER_WARM_SECS: u64 = 30 * 86400;
 
 /// 90-day expiry window. Chains not accessed in 90 days eject to dataset.
@@ -83,27 +80,23 @@ impl<'a> Sweeper<'a> {
     ///   warm → accessed 7–30 days ago
     ///   cold → not accessed in 30+ days
     pub fn sweep_tiers(&self) -> Result<SweepReport, TunnelError> {
-        let now = now_secs();
-        let _ = (
-            format!("{}Z", now.saturating_sub(TIER_HOT_SECS)),
-            format!("{}Z", now.saturating_sub(TIER_WARM_SECS)),
-        );
-
         // Cold: not accessed in 30+ days
-        let cold = self.librarian.expired_chains(30)?;
+        let cold = self.librarian.expired_chains(TIER_WARM_SECS / 86400)?;
         for parent_id in &cold {
             self.librarian.update_tier(parent_id, "cold")?;
         }
 
         // Warm: not accessed in 7+ days, but within 30 days
         let stale = self.librarian.expired_chains(7)?;
+        let mut warm_count = 0u32;
         for parent_id in &stale {
             if !cold.contains(parent_id) {
                 self.librarian.update_tier(parent_id, "warm")?;
+                warm_count += 1;
             }
         }
 
-        let chains_affected = (cold.len() + stale.len()) as u32;
+        let chains_affected = cold.len() as u32 + warm_count;
         Ok(SweepReport {
             sweep: "tiers",
             chains_affected,
@@ -198,12 +191,4 @@ pub struct SweepReport {
     pub sweep: &'static str,
     pub chains_affected: u32,
     pub orbs_ejected: u32,
-}
-
-fn now_secs() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }

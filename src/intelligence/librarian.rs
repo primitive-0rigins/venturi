@@ -142,7 +142,12 @@ impl Librarian {
         }
         self.conn
             .execute(
-                "INSERT INTO fts_orbs (orb_id, source, body) VALUES (?1, ?2, ?3)",
+                "INSERT INTO fts_orbs (orb_id, source, body)
+                 SELECT ?1, ?2, ?3
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM fts_orbs
+                     WHERE orb_id = ?1 AND source = ?2 AND body = ?3
+                 )",
                 params![orb_id, source, body],
             )
             .map_err(|e| TunnelError::DatabaseError(e.to_string()))?;
@@ -154,12 +159,13 @@ impl Librarian {
             serde_json::to_string(&entry.answer_facts).unwrap_or_else(|_| "[]".to_string());
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO orbs
+                "INSERT INTO orbs
              (orb_id, key_id, topic, domain, date, parent_id, sequence, chain_length,
               tier, last_accessed, last_accessed_at, access_count, usefulness_score,
               pinned, owner_agent_id, embedding, format, classification, content_type, answer_facts,
               summary_author, summary_model, summary_verified, summary_verified_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'hot',?9,?9,0,1.0,?10,?11,NULL,?12,?13,?14,?15,?16,?17,?18,?19)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'hot',?9,?9,0,1.0,?10,?11,NULL,?12,?13,?14,?15,?16,?17,?18,?19)
+             ON CONFLICT(orb_id) DO NOTHING",
                 params![
                     entry.orb_id,
                     entry.key_id,
@@ -190,7 +196,7 @@ impl Librarian {
         for (idx, foresight) in entry.foresights.iter().enumerate() {
             self.conn
                 .execute(
-                    "INSERT OR REPLACE INTO foresights
+                    "INSERT OR IGNORE INTO foresights
                      (parent_id, foresight_idx, foresight_text, relevant_from,
                       relevant_until, duration_days, created_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -737,7 +743,7 @@ impl Librarian {
         Ok(tiers)
     }
 
-    /// Reads the last-processed timestamp for a named sweep checkpoint (`None` on first run).
+    /// Reads the last-processed EXIT cursor for a named sweep checkpoint (`None` on first run).
     pub fn sweep_checkpoint(&self, name: &str) -> Result<Option<String>, TunnelError> {
         self.conn
             .query_row(
@@ -750,7 +756,8 @@ impl Librarian {
     }
 
     /// Advances a named sweep checkpoint. Used so a restart resumes from the last processed
-    /// EXIT event instead of reprocessing or dropping events.
+    /// EXIT event instead of reprocessing or dropping events. The stored value may include an
+    /// event row ID in addition to its timestamp.
     pub fn set_sweep_checkpoint(&self, name: &str, last_ts: &str) -> Result<(), TunnelError> {
         self.conn
             .execute(
@@ -1029,22 +1036,34 @@ impl Librarian {
     }
 
     pub fn set_legal_hold(&self, parent_id: &str, reason: &str) -> Result<(), TunnelError> {
-        self.conn
+        let changed = self
+            .conn
             .execute(
                 "UPDATE orbs SET legal_hold = 1, legal_hold_reason = ?1 WHERE parent_id = ?2",
                 params![reason, parent_id],
             )
             .map_err(|e| TunnelError::DatabaseError(e.to_string()))?;
+        if changed == 0 {
+            return Err(TunnelError::OrbNotFound {
+                id: parent_id.to_string(),
+            });
+        }
         Ok(())
     }
 
     pub fn release_legal_hold(&self, parent_id: &str) -> Result<(), TunnelError> {
-        self.conn
+        let changed = self
+            .conn
             .execute(
                 "UPDATE orbs SET legal_hold = 0, legal_hold_reason = NULL WHERE parent_id = ?1",
                 params![parent_id],
             )
             .map_err(|e| TunnelError::DatabaseError(e.to_string()))?;
+        if changed == 0 {
+            return Err(TunnelError::OrbNotFound {
+                id: parent_id.to_string(),
+            });
+        }
         Ok(())
     }
 
@@ -1950,6 +1969,31 @@ pub struct StructuredFilter {
 mod tests {
     use super::*;
 
+    fn test_orb_entry() -> OrbEntry {
+        OrbEntry {
+            orb_id: "orb-1".to_string(),
+            key_id: "key-1".to_string(),
+            topic: "topic".to_string(),
+            domain: "domain".to_string(),
+            date: "2026-01-01".to_string(),
+            parent_id: "parent-1".to_string(),
+            sequence: 1,
+            chain_length: 1,
+            format: "text".to_string(),
+            classification: "internal".to_string(),
+            content_type: "document".to_string(),
+            pinned: false,
+            owner_agent_id: "agent-1".to_string(),
+            summary: "replay-safe summary".to_string(),
+            answer_facts: Vec::new(),
+            summary_author: "agent-1".to_string(),
+            summary_model: None,
+            summary_verified: false,
+            summary_verified_at: None,
+            foresights: Vec::new(),
+        }
+    }
+
     #[test]
     fn vector_ids_roundtrip_to_orb_ids() {
         assert_eq!(
@@ -1961,6 +2005,41 @@ mod tests {
             Some("orb-2")
         );
         assert!(orb_id_from_vector_id("bad").is_none());
+    }
+
+    #[test]
+    fn replayed_catalog_registration_preserves_orb_state_and_fts_rows() {
+        let mut lib = Librarian::open(":memory:", "http://127.0.0.1:9", None, None).unwrap();
+        lib.register_orb(test_orb_entry()).unwrap();
+        lib.conn
+            .execute(
+                "UPDATE orbs SET access_count = 7, usefulness_score = 0.8 WHERE orb_id = 'orb-1'",
+                [],
+            )
+            .unwrap();
+
+        lib.register_orb(test_orb_entry()).unwrap();
+
+        let (access_count, usefulness_score): (u32, f64) = lib
+            .conn
+            .query_row(
+                "SELECT access_count, usefulness_score FROM orbs WHERE orb_id = 'orb-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let fts_rows: u32 = lib
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM fts_orbs WHERE orb_id = 'orb-1' AND source = 'summary'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(access_count, 7);
+        assert_eq!(usefulness_score, 0.8);
+        assert_eq!(fts_rows, 1);
     }
 
     #[test]

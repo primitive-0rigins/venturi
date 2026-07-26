@@ -191,37 +191,41 @@ impl Scribe {
         self.append("EXIT", &payload.to_string())
     }
 
-    /// Read all EXIT events since a given timestamp, with the timestamp of the last event read
-    /// (if any) so the caller can advance its own checkpoint. Consumed by
+    /// Read all EXIT events after a checkpoint cursor. New cursors include the event row ID as
+    /// well as the timestamp, so events written in the same second are not skipped. Legacy
+    /// timestamp-only checkpoints remain supported. Consumed by
     /// `Sweeper::sweep_lifecycle` to feed `Librarian::apply_exit_feedback` — see
     /// `spec/math-application-proposal-usefulness-score-tiering.md`.
     pub fn exit_events_since(
         &self,
-        since_ts: &str,
+        cursor: &str,
     ) -> Result<(Vec<ExitEvent>, Option<String>), TunnelError> {
+        let (since_ts, since_id) = parse_exit_cursor(cursor);
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT timestamp, payload FROM events
-             WHERE event_type = 'EXIT' AND timestamp > ?1
+                "SELECT id, timestamp, payload FROM events
+             WHERE event_type = 'EXIT'
+               AND (timestamp > ?1 OR (timestamp = ?1 AND id > ?2))
              ORDER BY id ASC",
             )
             .map_err(|e| TunnelError::DatabaseError(e.to_string()))?;
 
         let rows = stmt
-            .query_map(params![since_ts], |row| {
-                let timestamp: String = row.get(0)?;
-                let payload: String = row.get(1)?;
-                Ok((timestamp, payload))
+            .query_map(params![since_ts, since_id], |row| {
+                let id: i64 = row.get(0)?;
+                let timestamp: String = row.get(1)?;
+                let payload: String = row.get(2)?;
+                Ok((id, timestamp, payload))
             })
             .map_err(|e| TunnelError::DatabaseError(e.to_string()))?;
 
         let mut events = Vec::new();
-        let mut last_ts = None;
+        let mut last_cursor = None;
         for row in rows {
-            let (timestamp, payload) =
+            let (id, timestamp, payload) =
                 row.map_err(|e| TunnelError::DatabaseError(e.to_string()))?;
-            last_ts = Some(timestamp);
+            last_cursor = Some(format!("{timestamp}#{id}"));
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
                 let parent_id = v["parent_id"].as_str().unwrap_or("").to_string();
                 let orb_ids = v["orb_ids"]
@@ -242,7 +246,7 @@ impl Scribe {
                 });
             }
         }
-        Ok((events, last_ts))
+        Ok((events, last_cursor))
     }
 
     fn append(&self, event_type: &str, payload: &str) -> Result<(), TunnelError> {
@@ -336,6 +340,13 @@ fn now_iso() -> String {
     format!("{}Z", secs)
 }
 
+fn parse_exit_cursor(cursor: &str) -> (&str, i64) {
+    cursor
+        .rsplit_once('#')
+        .and_then(|(timestamp, id)| id.parse().ok().map(|id| (timestamp, id)))
+        .unwrap_or((cursor, 0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,5 +366,36 @@ mod tests {
 
         let (events, _) = scribe.exit_events_since("").unwrap();
         assert_eq!(events[0].recall, Some(1.0));
+    }
+
+    #[test]
+    fn cursor_does_not_skip_events_with_the_same_timestamp() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("scribe.db");
+        let scribe = Scribe::open(path.to_str().unwrap()).unwrap();
+        let payload = r#"{"parent_id":"parent-1","orb_ids":["orb-1"],"verdict":1,"recall":null}"#;
+        scribe
+            .conn
+            .execute(
+                "INSERT INTO events (event_type, timestamp, payload) VALUES ('EXIT', '123Z', ?1)",
+                params![payload],
+            )
+            .unwrap();
+
+        let (first_events, cursor) = scribe.exit_events_since("0").unwrap();
+        assert_eq!(first_events.len(), 1);
+
+        scribe
+            .conn
+            .execute(
+                "INSERT INTO events (event_type, timestamp, payload) VALUES ('EXIT', '123Z', ?1)",
+                params![payload],
+            )
+            .unwrap();
+
+        let (second_events, _) = scribe
+            .exit_events_since(cursor.as_deref().unwrap())
+            .unwrap();
+        assert_eq!(second_events.len(), 1);
     }
 }
