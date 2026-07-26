@@ -24,6 +24,12 @@ defmodule VenturiUiWeb.HoldController do
     end
   end
 
+  def create(conn, _params) do
+    conn
+    |> put_flash(:error, "parent ID and reason are required")
+    |> redirect(to: ~p"/holds")
+  end
+
   def delete(conn, %{"release" => %{"parent_id" => parent_id}}) do
     case VenturiClient.release_hold(parent_id) do
       {:ok, _} ->
@@ -36,5 +42,11 @@ defmodule VenturiUiWeb.HoldController do
         |> put_flash(:error, VenturiUiWeb.ApiError.format(reason))
         |> redirect(to: ~p"/holds")
     end
+  end
+
+  def delete(conn, _params) do
+    conn
+    |> put_flash(:error, "parent ID is required")
+    |> redirect(to: ~p"/holds")
   end
 end

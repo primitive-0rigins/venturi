@@ -48,4 +48,11 @@ defmodule VenturiUiWeb.ChainControllerTest do
     assert redirected_to(conn) == ~p"/chains?#{[parent_id: "chain-a"]}"
     assert Phoenix.Flash.get(conn.assigns.flash, :info) =~ "chain-a -> chain-b"
   end
+
+  test "POST /chains/link rejects malformed form data", %{conn: conn} do
+    conn = post(conn, ~p"/chains/link", %{"link" => %{}})
+
+    assert redirected_to(conn) == ~p"/chains"
+    assert Phoenix.Flash.get(conn.assigns.flash, :error) =~ "required"
+  end
 end

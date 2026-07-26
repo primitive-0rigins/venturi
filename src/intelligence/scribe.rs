@@ -178,7 +178,7 @@ impl Scribe {
             let actual_set: std::collections::HashSet<&str> =
                 orb_ids.iter().map(|s| s.as_str()).collect();
             let intersection = expected_set.intersection(&actual_set).count();
-            Some(intersection as f32 / expected_orb_ids.len() as f32)
+            Some(intersection as f32 / expected_set.len() as f32)
         };
 
         let payload = serde_json::json!({
@@ -334,4 +334,26 @@ fn now_iso() -> String {
         .unwrap_or_default()
         .as_secs();
     format!("{}Z", secs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn recall_uses_unique_expected_orb_ids() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("scribe.db");
+        let scribe = Scribe::open(path.to_str().unwrap()).unwrap();
+        let actual = vec!["orb-1".to_owned()];
+        let expected = vec!["orb-1".to_owned(), "orb-1".to_owned()];
+
+        scribe
+            .record_exit("parent-1", &actual, &expected, 1)
+            .unwrap();
+
+        let (events, _) = scribe.exit_events_since("").unwrap();
+        assert_eq!(events[0].recall, Some(1.0));
+    }
 }

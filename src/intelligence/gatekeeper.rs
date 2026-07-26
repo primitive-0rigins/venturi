@@ -406,6 +406,9 @@ impl Gatekeeper {
         if req.summary_verified_at.is_some() && !req.summary_verified {
             return Self::reject("summary_verified_at requires summary_verified");
         }
+        if !is_iso_date(&req.date) {
+            return Self::reject("date must be a valid ISO date (YYYY-MM-DD)");
+        }
         Self::validate_foresights(&req.foresights)?;
         Self::validate_content_type(req)?;
 
@@ -520,6 +523,9 @@ impl Gatekeeper {
             if foresight.relevant_until.trim().is_empty() {
                 return Self::reject("foresight relevant_until is required");
             }
+            if !is_iso_date(&foresight.relevant_from) || !is_iso_date(&foresight.relevant_until) {
+                return Self::reject("foresight dates must be valid ISO dates (YYYY-MM-DD)");
+            }
             if foresight.relevant_from > foresight.relevant_until {
                 return Self::reject("foresight relevant_from must be <= relevant_until");
             }
@@ -584,6 +590,38 @@ impl Gatekeeper {
         let _ = self.keystore.remove_by_parent(parent_id);
         self.journal.rollback_ingestion(parent_id, reason)
     }
+}
+
+fn is_iso_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    let digits = [0, 1, 2, 3, 5, 6, 8, 9];
+    if digits.iter().any(|&index| !bytes[index].is_ascii_digit()) {
+        return false;
+    }
+
+    let year = match value[0..4].parse::<u16>() {
+        Ok(year) => year,
+        Err(_) => return false,
+    };
+    let month = match value[5..7].parse::<u8>() {
+        Ok(month @ 1..=12) => month,
+        _ => return false,
+    };
+    let day = match value[8..10].parse::<u8>() {
+        Ok(day) => day,
+        Err(_) => return false,
+    };
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        _ => unreachable!("month was validated above"),
+    };
+    (1..=days_in_month).contains(&day)
 }
 
 struct SealedChain {

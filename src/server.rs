@@ -1312,9 +1312,22 @@ fn base64_encode(bytes: &[u8]) -> String {
     String::from_utf8(out).unwrap()
 }
 
-fn base64_decode(s: &str) -> Result<Vec<u8>, &'static str> {
-    let s = s.trim_end_matches('=');
-    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
+    let padding = input.bytes().rev().take_while(|&b| b == b'=').count();
+    if padding > 2 || input[..input.len().saturating_sub(padding)].contains('=') {
+        return Err("invalid base64 padding");
+    }
+    if padding > 0 && !input.len().is_multiple_of(4) {
+        return Err("invalid base64 padding");
+    }
+
+    let s = &input[..input.len().saturating_sub(padding)];
+    match (padding, s.len() % 4) {
+        (_, 1) | (1, 0 | 2) | (2, 0 | 3) => return Err("invalid base64 padding"),
+        _ => {}
+    }
+
+    let mut out = Vec::with_capacity((s.len() * 3).div_ceil(4));
     let mut buf = 0u32;
     let mut bits = 0u32;
 
@@ -1333,6 +1346,9 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, &'static str> {
             bits -= 8;
             out.push((buf >> bits) as u8);
         }
+    }
+    if bits > 0 && buf & ((1 << bits) - 1) != 0 {
+        return Err("invalid base64 trailing bits");
     }
     Ok(out)
 }
@@ -1358,6 +1374,18 @@ mod tests {
         // lock_mutex() must keep working — the whole point of this fix.
         let guard = lock_mutex(&mutex);
         assert_eq!(*guard, 1);
+    }
+
+    #[test]
+    fn base64_decode_rejects_malformed_padding_and_trailing_bits() {
+        assert_eq!(base64_decode("TWFu").unwrap(), b"Man");
+        assert_eq!(base64_decode("TWE=").unwrap(), b"Ma");
+        assert_eq!(base64_decode("TQ==").unwrap(), b"M");
+        assert_eq!(base64_decode("TWE").unwrap(), b"Ma");
+
+        for input in ["A", "TQ=", "TQ===", "T=Q=", "TR", "TWF"] {
+            assert!(base64_decode(input).is_err(), "{input} should be rejected");
+        }
     }
 
     #[test]

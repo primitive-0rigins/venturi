@@ -42,4 +42,14 @@ defmodule VenturiUiWeb.HoldControllerTest do
     assert redirected_to(conn) == ~p"/holds"
     assert Phoenix.Flash.get(conn.assigns.flash, :error) =~ "API returned 403"
   end
+
+  test "hold actions reject malformed form data", %{conn: conn} do
+    create = post(conn, ~p"/holds", %{})
+    assert redirected_to(create) == ~p"/holds"
+    assert Phoenix.Flash.get(create.assigns.flash, :error) =~ "required"
+
+    release = delete(conn, ~p"/holds", %{})
+    assert redirected_to(release) == ~p"/holds"
+    assert Phoenix.Flash.get(release.assigns.flash, :error) =~ "required"
+  end
 end

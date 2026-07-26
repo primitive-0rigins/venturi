@@ -48,14 +48,10 @@ impl OrbShelf {
     /// Remove an orb by hex string. Used during rollback cleanup.
     /// Returns Ok(()) even if the file didn't exist.
     pub fn remove(&self, orb_id_hex: &str) -> Result<(), TunnelError> {
-        if orb_id_hex.len() < 4 {
+        let Some(orb_id) = OrbId::from_hex(orb_id_hex) else {
             return Ok(());
-        }
-        let path = self
-            .root
-            .join(&orb_id_hex[0..2])
-            .join(&orb_id_hex[2..4])
-            .join(orb_id_hex);
+        };
+        let path = self.orb_path(&orb_id);
         if path.exists() {
             std::fs::remove_file(&path)?;
         }
@@ -93,4 +89,22 @@ fn restrict_file(path: &Path) -> Result<(), TunnelError> {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn remove_ignores_non_orb_ids() {
+        let dir = tempdir().unwrap();
+        let shelf = OrbShelf::new(dir.path().join("shelf"));
+        let sentinel = dir.path().join("sentinel");
+        std::fs::write(&sentinel, b"keep").unwrap();
+
+        shelf.remove("../../sentinel").unwrap();
+
+        assert!(sentinel.exists());
+    }
 }

@@ -38,13 +38,16 @@ defmodule VenturiUiWeb.ChainController do
     )
   end
 
-  def create_link(conn, %{"link" => link_params}) do
-    %{
-      "from_parent_id" => from_parent_id,
-      "to_parent_id" => to_parent_id,
-      "reference_type" => reference_type
-    } = link_params
-
+  def create_link(
+        conn,
+        %{
+          "link" => %{
+            "from_parent_id" => from_parent_id,
+            "to_parent_id" => to_parent_id,
+            "reference_type" => reference_type
+          }
+        }
+      ) do
     case VenturiClient.link_chain(from_parent_id, to_parent_id, reference_type) do
       {:ok, _} ->
         conn
@@ -56,5 +59,11 @@ defmodule VenturiUiWeb.ChainController do
         |> put_flash(:error, VenturiUiWeb.ApiError.format(reason))
         |> redirect(to: ~p"/chains")
     end
+  end
+
+  def create_link(conn, _params) do
+    conn
+    |> put_flash(:error, "from parent, to parent, and reference type are required")
+    |> redirect(to: ~p"/chains")
   end
 end

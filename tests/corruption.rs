@@ -227,6 +227,26 @@ fn invalid_gatekeeper_input_is_rejected_before_journal_open() {
 }
 
 #[test]
+fn invalid_calendar_dates_are_rejected_before_journal_open() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().to_str().unwrap().to_string();
+    let mut v = Venturi::open(config(&dir)).unwrap();
+    let mut req = request("invalid date", vec![b"content".to_vec()]);
+    req.date = "2026-02-29".to_string();
+
+    assert!(matches!(
+        v.ingest(req),
+        Err(TunnelError::GatekeeperRejected { .. })
+    ));
+
+    let conn = Connection::open(format!("{}/journal.db", root)).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM ingestions", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[test]
 fn multi_orb_ingestion_uses_one_chain_key() {
     let dir = TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap().to_string();
