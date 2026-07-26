@@ -25,7 +25,7 @@ rusqlite         = { version = "0.31", features = ["bundled", "load_extension"] 
 uuid             = { version = "1", features = ["v4"] }
 # Use the platform trust store for optional HTTPS model endpoints. This avoids
 # bundling the CDLA-licensed webpki-roots data through ureq's default feature.
-ureq             = { version = "2", default-features = false, features = ["json", "native-tls"] }
+ureq             = { version = "3", default-features = false, features = ["json", "native-tls"] }
 axum             = "0.7"
 tokio            = { version = "1", features = ["full"] }
 tower-http       = { version = "0.5", features = ["trace"] }
