@@ -1,0 +1,44 @@
+name: Bug report
+description: Report a reproducible problem in Venturi.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, encryption keys, stored memory content, or
+        security vulnerabilities. Use the private security-reporting link
+        instead for security issues.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: State the observed behavior and why it is incorrect.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Venturi revision
+      description: Commit SHA, release, or branch.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment and logs
+      description: Rust version, operating system, deployment mode, and sanitized logs.

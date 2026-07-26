@@ -12,3 +12,6 @@
 *.pem
 .env
 .env.*
+
+# Generated build artifacts. CI regenerates and uploads this.
+/venturi.cdx.json
