@@ -1174,6 +1174,21 @@ fn tier_sweep_counts_a_cold_chain_once() {
     assert_eq!(report.chains_affected, 1);
 }
 
+#[test]
+fn access_mark_sweep_reports_flushed_chains() {
+    let dir = TempDir::new().unwrap();
+    let mut v = Venturi::open(test_config(&dir)).unwrap();
+    let result = v
+        .ingest(test_request("accessed", vec![b"accessed".to_vec()]))
+        .unwrap();
+
+    v.document_by_parent_id(&result.parent_id, None).unwrap();
+
+    let report = v.sweep_access_marks().unwrap();
+    assert_eq!(report.chains_affected, 1);
+    assert_eq!(report.orbs_ejected, 0);
+}
+
 /// context() returns MemoryNotFound when nothing is indexed.
 /// Since Ollama is not running in tests, similarity_search fails → EmbeddingUnavailable.
 #[test]

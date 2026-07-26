@@ -65,10 +65,10 @@ impl<'a> Sweeper<'a> {
     /// chain touched since the last sweep. A single orb access refreshes the
     /// entire chain's 90-day expiry clock.
     pub fn sweep_access_marks(&self) -> Result<SweepReport, TunnelError> {
-        self.librarian.flush_access_marks()?;
+        let chains_affected = self.librarian.flush_access_marks()?;
         Ok(SweepReport {
             sweep: "access_marks",
-            chains_affected: 0,
+            chains_affected,
             orbs_ejected: 0,
         })
     }

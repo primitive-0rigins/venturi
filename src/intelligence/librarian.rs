@@ -1162,7 +1162,7 @@ impl Librarian {
         Ok(count > 0)
     }
 
-    pub fn flush_access_marks(&self) -> Result<(), TunnelError> {
+    pub fn flush_access_marks(&self) -> Result<u32, TunnelError> {
         let marks: Vec<(String, String)> = {
             let mut stmt = self
                 .conn
@@ -1191,7 +1191,7 @@ impl Librarian {
             .execute("DELETE FROM access_marks", [])
             .map_err(|e| TunnelError::DatabaseError(e.to_string()))?;
 
-        Ok(())
+        Ok(marks.len() as u32)
     }
 
     pub fn embed(&self, text: &str) -> Result<Vec<f32>, TunnelError> {
