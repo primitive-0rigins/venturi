@@ -159,8 +159,7 @@ column. Where the Tier Update Sweep is long-term retention tiering
 (day-scale), this is an in-memory RAM-eviction cache scoped per
 `owner_agent_id`, driven by `LifecycleConfig` (defaults: 5 min to warm, 10
 min to cold, capped at 500 hot orbs per actor). See
-`VENTURI_ROADMAP.md` (B15 — Context Lifecycle Manager) for the full design
-rationale.
+`VENTURI_ROADMAP.md` (B15 — Lifecycle tiering) for the roadmap entry.
 
 ```
 cold demotion:  idle >= t_cold_secs AND access_count < 2
