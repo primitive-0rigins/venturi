@@ -10,6 +10,11 @@ Describe the change and the roadmap item or issue it addresses.
 - [ ] `cargo test --locked`
 - [ ] `mix format --check-formatted` and `mix test` in `ui/`, if the dashboard changed
 
+## Sign-off
+
+- [ ] Every commit carries a `Signed-off-by` line (`git commit -s`), per
+      [CONTRIBUTING.md](../CONTRIBUTING.md)
+
 ## Documentation
 
 - [ ] Documentation is current, or no update is needed
