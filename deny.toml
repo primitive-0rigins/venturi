@@ -7,8 +7,12 @@ ignore = ["RUSTSEC-2024-0436"]
 confidence-threshold = 0.8
 allow = [
   "Apache-2.0",
-  # Venturi's own license. cargo-deny evaluates the root crate alongside
-  # dependencies, so the project license has to be allowed explicitly.
+  # Venturi's own license; cargo-deny evaluates the root crate alongside
+  # dependencies. `FSL-1.1-Apache-2.0` (the Cargo.toml `license` field, and the
+  # name in LICENSE) is not in cargo-deny's SPDX vocabulary, so it warns on the
+  # field and falls back to matching the LICENSE text, which resolves to the
+  # SPDX-known spelling of the same license. Both names cover identical terms.
+  # Removing this entry does not skip the check — it fails it.
   "FSL-1.1-ALv2",
   "BSD-2-Clause",
   "BSD-3-Clause",

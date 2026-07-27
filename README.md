@@ -89,7 +89,7 @@ Please read [CONTRIBUTING.md](CONTRIBUTING.md) and follow the
 
 ## License
 
-[FSL-1.1-ALv2](LICENSE) — the Functional Source License with an Apache-2.0
+[FSL-1.1-Apache-2.0](LICENSE) — the Functional Source License with an Apache-2.0
 future license.
 
 - Running Venturi for your own internal use and access is a Permitted Purpose,
