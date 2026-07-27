@@ -933,7 +933,7 @@ filters, selected_orb_ids, embedding_model_version. That IS the training signal.
 **What this means architecturally:**
 - The embedding model is not a dependency. It is a slot. It gets upgraded.
 - Venturi's retrieval quality compounds over time without changing the retrieval code.
-- The Scribe log IS the dataset foundry input for embedding model evolution.
+- The Scribe log IS the training-data source for embedding model evolution.
 - The embedding dimension must be fixed per Vec0 table — model upgrades require
   a migration step (rebuild embeddings_vec with new model). Plan for this.
 
@@ -949,11 +949,11 @@ filters, selected_orb_ids, embedding_model_version. That IS the training signal.
 pinned protection, cache tier visibility, and Scribe daemon health events.
 
 **Effort:** Medium (2–3 days) | **Value:** High (RAM protection at scale)
-**Source:** MemOS-main — DreamMemoryLifecycle concept + Skeptic review 2026-05-29
+**Source:** MemOS-main — DreamMemoryLifecycle concept + design review 2026-05-29
 
 **The problem:** Venturi is on track to eliminate the startup `HashMap` (B10), but retrieval
-still loads embeddings into working memory per query. With 25 simultaneous agents across 6
-nodes, each with their own corpus, active working sets compete for RAM. No mechanism exists
+still loads embeddings into working memory per query. With many concurrent callers, each
+with their own corpus, active working sets compete for RAM. No mechanism exists
 to evict unused orb context from memory — everything that's been touched stays touched.
 
 **The design:** Three memory tiers, driven by wall clock time, scoped per actor_id.
