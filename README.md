@@ -89,4 +89,20 @@ Please read [CONTRIBUTING.md](CONTRIBUTING.md) and follow the
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+[FSL-1.1-ALv2](LICENSE) — the Functional Source License with an Apache-2.0
+future license.
+
+- Running Venturi for your own internal use and access is a Permitted Purpose,
+  as are non-commercial education, non-commercial research, and professional
+  services you provide to a licensee.
+- The one restriction is Competing Use: you may not make Venturi available to
+  others in a commercial product or service that substitutes for it or offers
+  substantially similar functionality.
+- Each released version additionally becomes available under the Apache License,
+  Version 2.0 on the second anniversary of that version's publication. The
+  conversion is per release, not one date for the project.
+- Versions published on or before the relicense commit remain available under
+  the MIT License they were released under.
+
+This summary is for orientation only; [LICENSE](LICENSE) is the controlling
+text.

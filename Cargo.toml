@@ -3,7 +3,7 @@ name = "venturi"
 version = "0.1.0"
 edition = "2021"
 description = "Local, encrypted, governed memory infrastructure for AI agents"
-license = "MIT"
+license = "FSL-1.1-ALv2"
 
 [[bin]]
 name = "venturi"
