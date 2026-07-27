@@ -15,3 +15,6 @@
 
 # Generated build artifacts. CI regenerates and uploads this.
 /venturi.cdx.json
+
+# Long-range planning notes. Not published.
+/VENTURI_ROADMAP_INTERNAL.md
