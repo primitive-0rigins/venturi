@@ -21,7 +21,7 @@ serde            = { version = "1", features = ["derive"] }
 serde_json       = "1"
 thiserror        = "1"
 rand             = "0.10"
-rusqlite         = { version = "0.31", features = ["bundled", "load_extension"] }
+rusqlite         = { version = "0.40", features = ["bundled", "load_extension"] }
 uuid             = { version = "1", features = ["v4"] }
 # Use the platform trust store for optional HTTPS model endpoints. This avoids
 # bundling the CDLA-licensed webpki-roots data through ureq's default feature.
